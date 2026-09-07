@@ -266,6 +266,7 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
             # V1.1 表澄清回填：「已确认查询表：X」是前端点选后的系统回填句，
             # 不是新业务问题——从上一轮 clarify 消息还原 original_question，确认表经 history 锁定选表
             is_table_confirm = bool(re.search(r"已确认查询表[:：]", body.question or ""))
+            confirmed_tables: list[str] | None = None
             if is_table_confirm:
                 _last_clarify = (db.query(ConversationMessage)
                                  .filter(ConversationMessage.conversation_id == conv_id,
@@ -278,6 +279,17 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
                         prev_spec.model_dump(mode="json") if prev_spec else None,
                         dict_terms)
                     logger.info("表澄清回填，还原原始问题: %s", question)
+                # 解析用户勾选的确认表清单（"已确认查询表：meet_info、video_meet_info"），
+                # 传入 parse_query_spec 约束指标/维度/时间只能从确认表字段中抽取，
+                # 否则 Spec（"我理解的问题"）会从全库候选误选无关表字段（如审批表授权类型）
+                _m_tb = re.search(r"已确认查询表[:：]\s*([^。；;\n]+)", body.question or "")
+                if _m_tb:
+                    _tables = [t.strip() for t in re.split(r"[、,，\s]+", _m_tb.group(1)) if t.strip()]
+                    # 剥离 schema 前缀（如 fs_zoommeeting.meet_info → meet_info），与 TableMeta.table_name 对齐
+                    _tables = [t.rsplit(".", 1)[-1] for t in _tables]
+                    if _tables:
+                        confirmed_tables = _tables
+                        logger.info("表澄清回填，确认表清单: %s", confirmed_tables)
 
             # ===== FAQ 优先匹配（意图识别之前）：命中即用 FAQ 对回答 =====
             yield _sse("progress", {"stage": "faq", "msg": "正在匹配知识库 FAQ…"})
@@ -342,7 +354,8 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
             parse_result = parse_query_spec(
                 question, datasource_id, ws_id, llm=llm,
                 prev_spec=prev_spec, clarify_answer=body.clarify_answer,
-                dicts=dicts, schema_name=body.schema_name)
+                dicts=dicts, schema_name=body.schema_name,
+                confirmed_tables=confirmed_tables)
             logger.info("[问数][%s][spec] parse_query_spec 结果: status=%s missing=%s"
                         " | rewritten=%r", log.id, parse_result["status"],
                         parse_result.get("missing"), question[:80])
@@ -419,7 +432,8 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
             # 降级到 LLM 全表选表路径，由 LLM 根据问题语义选表并生成计算 SQL。
             mapping = None
             try:
-                mapping = map_spec_to_schema(spec, datasource_id, user.id, dicts=dicts)
+                mapping = map_spec_to_schema(spec, datasource_id, user.id, dicts=dicts,
+                                             tables=confirmed_tables)
                 logger.info("[问数][%s][mapping] 字段映射成功: metrics=%s dims=%s",
                             log.id,
                             [(m.get("comment") or m.get("column")) for m in mapping.get("metrics", [])],

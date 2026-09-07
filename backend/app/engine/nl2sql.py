@@ -1091,7 +1091,7 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
         user_prompt += f"""
 【上次执行失败，必须修正】
 {exec_error}
-请分析错误原因并修正 SQL：**保持用户问题的查询语义不变**（项目/时间/状态等过滤条件、分组维度、计数/聚合形态都不得删减或改变），只修正报错本身；只使用【可用表与字段】中确切存在的表名和字段；聚合查询中 GROUP BY 必须包含 SELECT 中全部非聚合列（注意 only_full_group_by 模式）；若错误为 Subquery returns more than 1 row，必须把 `= (SELECT ...)` 改为 `IN (SELECT ...)`；修正后**仅输出**修正后的 ```sql 代码块（含必要注释）。"""
+请分析错误原因并修正 SQL：**保持用户问题的查询语义不变**（项目/时间/状态等过滤条件、分组维度、计数/聚合形态都不得删减或改变），只修正报错本身；只使用【可用表与字段】中确切存在的表名和字段；聚合查询中 GROUP BY 必须包含 SELECT 中全部非聚合列（注意 only_full_group_by 模式）；若错误为 Subquery returns more than 1 row，必须把 `= (SELECT ...)` 改为 `IN (SELECT ...)`；若错误为 Column 'xxx' in field list is ambiguous（列名歧义），必须为 SELECT、ORDER BY、WHERE、GROUP BY 中的重名列显式加上表别名限定（如 stat_a.xxx、stat_b.xxx），并保证 JOIN 条件与 SELECT 列使用同一别名；修正后**仅输出**修正后的 ```sql 代码块（含必要注释）。"""
 
     client = llm
     if client is None or not client.configured:
@@ -1468,7 +1468,7 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
         user_prompt += f"""
 【上次执行失败，必须修正】
 {exec_error}
-请分析错误原因并修正 SQL：**保持用户问题的查询语义不变**（项目/时间/状态等过滤条件、分组维度、计数/聚合形态都不得删减或改变），只修正报错本身；只使用【可用表与字段】中确切存在的表名和字段；聚合查询中 GROUP BY 必须包含 SELECT 中全部非聚合列（注意 only_full_group_by 模式）；若错误为 Subquery returns more than 1 row，必须把 `= (SELECT ...)` 改为 `IN (SELECT ...)`；修正后**仅输出**修正后的 ```sql 代码块（含必要注释）。"""
+请分析错误原因并修正 SQL：**保持用户问题的查询语义不变**（项目/时间/状态等过滤条件、分组维度、计数/聚合形态都不得删减或改变），只修正报错本身；只使用【可用表与字段】中确切存在的表名和字段；聚合查询中 GROUP BY 必须包含 SELECT 中全部非聚合列（注意 only_full_group_by 模式）；若错误为 Subquery returns more than 1 row，必须把 `= (SELECT ...)` 改为 `IN (SELECT ...)`；若错误为 Column 'xxx' in field list is ambiguous（列名歧义），必须为 SELECT、ORDER BY、WHERE、GROUP BY 中的重名列显式加上表别名限定（如 stat_a.xxx、stat_b.xxx），并保证 JOIN 条件与 SELECT 列使用同一别名；修正后**仅输出**修正后的 ```sql 代码块（含必要注释）。"""
 
     client = llm
     if client is None or not client.configured:

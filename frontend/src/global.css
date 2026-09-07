@@ -267,11 +267,18 @@ body {
 
 /* ---------- 聊天区玻璃 ---------- */
 .glass-msg-user {
+  max-width: 80%;
   background: linear-gradient(135deg, rgba(22, 119, 255, 0.9), rgba(64, 150, 255, 0.82)) !important;
   color: #fff !important;
   border-radius: 14px 14px 4px 14px !important;
   box-shadow: 0 8px 24px rgba(22, 119, 255, 0.28);
   border: none !important;
+}
+/* 窄屏：用户问题气泡放宽到 92%，长问题换行更少、完整可读 */
+@media (max-width: 900px) {
+  .glass-msg-user {
+    max-width: 92%;
+  }
 }
 .glass-msg-assistant {
   background: rgba(255, 255, 255, 0.62) !important;
@@ -298,6 +305,21 @@ body {
 }
 .glass-chat-input .ant-btn-primary {
   border-radius: 50% !important;
+}
+
+/* ---------- AI 问数：顶部工具栏小屏适配 ----------
+ * 标题 display 由该类控制（不用内联），媒体查询才能覆盖为 none；
+ * 窗口较窄时隐藏绝对居中的标题，避免与右侧数据源/库下拉重叠；
+ * 下拉宽度已用 clamp() 随视口收缩，工具栏整体 flex-wrap 可换行 */
+.chat-toolbar-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+@media (max-width: 1100px) {
+  .chat-toolbar-title {
+    display: none;
+  }
 }
 
 /* ============ 玻璃风格滚动条（全站统一） ============ */

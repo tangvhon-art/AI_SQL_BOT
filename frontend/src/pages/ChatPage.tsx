@@ -18,6 +18,9 @@ import { useMessageApi } from '../hooks/useMessageApi'
 // 问数节点步骤：按后端 progress 动态展示（意图识别/知识检索/SQL 链路均逐节点显示）
 interface StepState { label: string; done: boolean; active: boolean }
 
+// 对话区最大宽度：加宽 + 自适应（小屏占满可用宽，大屏封顶，避免宽屏左右大块留白）
+const CHAT_MAX_W = 'min(100%, 1200px)'
+
 export default function ChatPage() {
   const { msgApi, ctx, toastError } = useMessageApi()
   const [steps, setSteps] = useState<StepState[]>([])
@@ -410,7 +413,7 @@ export default function ChatPage() {
         onChange={handleFileInputChange}
       />
       <div className="glass-chat-input" style={{
-        maxWidth: 880, margin: '0 auto',
+        maxWidth: CHAT_MAX_W, margin: '0 auto',
         display: 'flex', flexDirection: 'column',
         background: '#f5f5f7',
         border: 'none',
@@ -581,8 +584,9 @@ export default function ChatPage() {
       {ctx}
       {/* ---------- 顶部工具栏 ---------- */}
       <div className="glass-header" style={{
-        height: 56, flexShrink: 0, padding: '0 16px',
+        minHeight: 56, flexShrink: 0, padding: '8px 16px',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        flexWrap: 'wrap', rowGap: 8, columnGap: 8,
         position: 'relative', zIndex: 5, borderRadius: '16px 16px 0 0',
       }}>
         <Space size={10}>
@@ -593,13 +597,14 @@ export default function ChatPage() {
             <Button type="text" shape="circle" icon={<PlusOutlined style={{ fontSize: 17 }} />} onClick={newConversation} />
           </Tooltip>
         </Space>
-        <div style={{ position: 'absolute', left: '50%', transform: 'translateX(-50%)', display: 'flex', alignItems: 'center', gap: 8 }}>
+        {/* 小屏（≤1100px）时隐藏居中标题，避免与右侧数据源/库下拉重叠；display 由 CSS 类控制以便媒体查询覆盖 */}
+        <div className="chat-toolbar-title" style={{ position: 'absolute', left: '50%', transform: 'translateX(-50%)' }}>
           <Typography.Text strong style={{ fontSize: 15 }}>AI 问数</Typography.Text>
           {streaming ? <Tag color="processing" style={{ marginInlineEnd: 0 }}>{stage || '处理中'}</Tag> : null}
         </div>
         <GlassSelect
           size="small"
-          style={{ width: 200 }}
+          style={{ width: 'clamp(150px, 22vw, 200px)' }}
           placeholder="选择数据源（默认第一个已同步）"
           value={dsId ?? undefined}
           onChange={setDsId}
@@ -609,7 +614,7 @@ export default function ChatPage() {
         {schemaList.length > 1 ? (
           <GlassSelect
             size="small"
-            style={{ width: 160 }}
+            style={{ width: 'clamp(120px, 17vw, 160px)' }}
             placeholder="项目/库（可选）"
             value={schemaName ?? undefined}
             onChange={setSchemaName}
@@ -691,12 +696,12 @@ export default function ChatPage() {
           justifyContent: 'center', alignItems: 'center', padding: '0 16px', gap: 36,
         }}>
           {emptyHero}
-          <div style={{ width: '100%', maxWidth: 880 }}>{inputBox}</div>
+          <div style={{ width: '100%', maxWidth: CHAT_MAX_W }}>{inputBox}</div>
         </div>
       ) : (
         <>
-          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '24px 16px 8px' }}>
-            <div style={{ maxWidth: 880, margin: '0 auto', width: '100%' }}>
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '24px 20px 8px' }}>
+            <div style={{ maxWidth: CHAT_MAX_W, margin: '0 auto', width: '100%' }}>
               {messages.map((m, i) => (
                 <MessageCard
                   key={m.id ?? `msg-${i}`}
@@ -711,7 +716,7 @@ export default function ChatPage() {
               <div ref={bottomRef} style={{ height: 4 }} />
             </div>
           </div>
-          <div style={{ flexShrink: 0, padding: '12px 16px 20px' }}>{inputBox}</div>
+          <div style={{ flexShrink: 0, padding: '12px 20px 20px' }}>{inputBox}</div>
         </>
       )}
     </div>

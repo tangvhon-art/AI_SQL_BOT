@@ -51,12 +51,14 @@ def fetch_schemas(datasource_id: int) -> list[str]:
 
 
 def fetch_schema_candidates(datasource_id: int,
-                            schema_name: str | None = None) -> dict[str, list[dict]]:
+                            schema_name: str | None = None,
+                            tables: list[str] | None = None) -> dict[str, list[dict]]:
     """从 Schema 提取候选要素（供规则引擎实体抽取与澄清候选展示）：
     {metrics: [{table, column, comment, data_type, agg}],
      dimensions: [{table, column, comment, data_type}],
      time_fields: [{table, column, comment}]}
-    schema_name 非空时按 schema（项目/库）限定候选表范围。
+    schema_name 非空时按 schema（项目/库）限定候选表范围；
+    tables 非空时只返回这些表（用户确认表后的指标/维度解析必须限定在确认表内）。
     """
     db = SessionLocal()
     try:
@@ -65,6 +67,8 @@ def fetch_schema_candidates(datasource_id: int,
                      TableMeta.deprecated.is_(False)))
         if schema_name:
             q = q.filter(TableMeta.schema_name == schema_name)
+        if tables:
+            q = q.filter(TableMeta.table_name.in_(tables))
         tables = q.all()
         metrics, dims, times = [], [], []
         for t in tables:
@@ -164,7 +168,8 @@ def _strip_bucket_suffix(term: str) -> str:
 
 
 def map_spec_to_schema(spec: Any, datasource_id: int, user_id: int,
-                       dicts: dict[str, list[dict]] | None = None) -> dict:
+                       dicts: dict[str, list[dict]] | None = None,
+                       tables: list[str] | None = None) -> dict:
     """把 QuerySpec 映射到数据源真实字段。
 
     返回 {table, metrics:[{name, column, comment, agg, unit}],
@@ -173,10 +178,11 @@ def map_spec_to_schema(spec: Any, datasource_id: int, user_id: int,
           time_field:{column, comment} | None,
           denied:[...]}
     任一关键映射失败抛 MappingError（友好提示）。
+    tables: 用户已确认的查询表（表澄清确认轮传入），映射候选限定在这些表内。
     """
     # schema（项目/库）限定候选范围：优先 spec.schema，其次问题提取
     schema_name = getattr(spec, "schema", "") or None
-    candidates = fetch_schema_candidates(datasource_id, schema_name)
+    candidates = fetch_schema_candidates(datasource_id, schema_name, tables)
     db = SessionLocal()
     try:
         dicts = dicts or {}

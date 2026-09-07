@@ -499,6 +499,7 @@ SPEC_EXTRACT_PROMPT = """你是企业数据问数意图解析器。把用户问�
 - intent：趋势/逐月→trend；同比/环比/对比→compare；排名/前N→ranking；明细/列表→detail；占比/比例/构成→statistic；**每个/各个/分别/各 + 维度 + 数量/数值（分组统计，如"各项目用例数分别是多少"）→statistic；范围/区间/分布（如"文件大小范围的分布"）→statistic**；其余单值数值→value
 - 指标和维度必须从【可选指标】【可选维度】中选择（可用中文注释或英文字段名），禁止编造
 - **分箱维度（bucket）**：仅当维度语义是"范围/区间"（大小范围/金额区间/年龄段/时长区间）时输出 bucket；ranges 用合理业务边界（按用户原话或常见分档），labels 与 ranges 一一对应（如 ["0-1MB","1-10MB","10MB以上"]），unit 填单位；字段不在此列可留空 field
+- **禁止用 bucket 表达时间粒度**：每天/每周/每月/按天/按周/按月等时间分组，用 time_expr 表达时间范围（如 近7天/本月），日期分组由查询逻辑处理；bucket.ranges 只能是数值区间，严禁写入日期（如 ["2023-01-01","2023-12-31"]）
 - compare 时 action.compare_target：环比=mom、同比=yoy、维度对比=dim
 - 用户问题若未提及时间，time_expr 留空
 - 多轮追问（如"环比去年呢""按渠道拆分呢"）时，依据上一轮 QuerySpec 继承指标/维度，只改时间或加维度"""
@@ -507,15 +508,27 @@ SPEC_EXTRACT_PROMPT = """你是企业数据问数意图解析器。把用户问�
 def _llm_extract_spec(question: str, datasource_id: int, llm,
                       prev_spec: QuerySpec | None,
                       schema_name: str | None = None,
-                      rewrite_hint: dict | None = None) -> dict | None:
-    candidates = fetch_schema_candidates(datasource_id, schema_name)
+                      rewrite_hint: dict | None = None,
+                      confirmed_tables: list[str] | None = None) -> dict | None:
+    candidates = fetch_schema_candidates(datasource_id, schema_name, confirmed_tables)
     schema_scope = f"【查询范围 schema】{schema_name}" if schema_name else ""
-    metrics_hint = "；".join(f"{m['comment'] or m['column']}({m['column']}, {m['table']})"
-                             for m in candidates["metrics"][:30]) or "（无）"
-    dims_hint = "；".join(f"{d['comment'] or d['column']}({d['column']}, {d['table']})"
-                          for d in candidates["dimensions"][:20]) or "（无）"
-    times_hint = "；".join(f"{t['comment'] or t['column']}({t['column']}, {t['table']})"
-                           for t in candidates["time_fields"][:10]) or "（无）"
+    # 问题实体相关表：问题重构的拆表检索词命中表/表注释 → 字段前置并标注【相关】，
+    # 引导 LLM 优先从问题实体对应的表中选择指标/维度（防止选中无关表的字段，如"会议"误配审批字段）
+    table_hints = [h for h in ((rewrite_hint or {}).get("table_hints") or []) if h]
+    related = set()
+    if table_hints:
+        for bucket in ("metrics", "dimensions", "time_fields"):
+            for it in candidates.get(bucket, []):
+                t = it.get("table") or ""
+                tc = it.get("table_comment") or ""
+                if any(h and (h in t or h in tc) for h in table_hints):
+                    related.add(t)
+    def _fmt(it: dict) -> str:
+        tag = "【相关】" if (it.get("table") or "") in related else ""
+        return f"{tag}{it['comment'] or it['column']}({it['column']}, {it['table']})"
+    metrics_hint = "；".join(_fmt(m) for m in candidates["metrics"][:30]) or "（无）"
+    dims_hint = "；".join(_fmt(d) for d in candidates["dimensions"][:20]) or "（无）"
+    times_hint = "；".join(_fmt(t) for t in candidates["time_fields"][:10]) or "（无）"
     prev_text = ""
     if prev_spec:
         prev_text = f"\n【上一轮 QuerySpec】{json.dumps(spec_to_dict(prev_spec), ensure_ascii=False)}"
@@ -533,7 +546,17 @@ def _llm_extract_spec(question: str, datasource_id: int, llm,
             hint_parts.append(f"筛选条件参考={'、'.join(str(x) for x in rewrite_hint['filters_hint'])}")
         if hint_parts:
             hint_text = f"\n【问题重构提示（供参考，指标/维度仍需从可选列表选择）】\n{'；'.join(hint_parts)}"
-    user_prompt = (f"{schema_scope}\n{prev_text}\n{hint_text}\n\n【用户问题】{question}\n\n"
+    # 选择规则：标注【相关】的表与问题实体最匹配，必须优先从中选择；确认表时只允许选择确认表的字段
+    select_note = ""
+    if related:
+        select_note = (f"\n【选择规则】标注【相关】的字段来自与问题最相关的表"
+                       f"（{'、'.join(sorted(related))}），指标与维度必须优先从中选择；"
+                       "禁止选择与问题实体无关的其他表字段。")
+    elif confirmed_tables:
+        select_note = (f"\n【选择规则】用户已确认查询表：{'、'.join(confirmed_tables)}，"
+                       "指标与维度只能从这些表的字段中选择。")
+    user_prompt = (f"{schema_scope}\n{prev_text}\n{hint_text}\n{select_note}\n\n"
+                   f"【用户问题】{question}\n\n"
                    f"请输出上述 JSON Schema 的完整 JSON。")
     system = SPEC_EXTRACT_PROMPT.format(
         metrics_hint=metrics_hint, dims_hint=dims_hint, times_hint=times_hint)
@@ -566,10 +589,19 @@ def _spec_from_llm_data(data: dict, question: str, prev_spec: QuerySpec | None) 
             bucket = None
             b = d.get("bucket") or {}
             if isinstance(b, dict) and b.get("ranges"):
-                bucket = BucketSpec(field=str(b.get("field") or ""),
-                                    ranges=b["ranges"],
-                                    labels=[str(x) for x in (b.get("labels") or [])],
-                                    unit=str(b.get("unit") or ""))
+                try:
+                    _num_ranges = [[float(x), float(y)] for x, y in b["ranges"]]
+                except (TypeError, ValueError):
+                    # LLM 常把"每天/按天/近7天"误写成日期区间 bucket（bucket 仅用于数值分箱）：
+                    # 丢弃 bucket 保留维度，避免整个 Spec 因 BucketSpec 校验失败而作废
+                    _num_ranges = None
+                    logger.info("[问数][spec] LLM bucket.ranges 非数值（%r），忽略 bucket 保留维度 %s",
+                                str(b["ranges"])[:60], d.get("name"))
+                if _num_ranges:
+                    bucket = BucketSpec(field=str(b.get("field") or ""),
+                                        ranges=_num_ranges,
+                                        labels=[str(x) for x in (b.get("labels") or [])],
+                                        unit=str(b.get("unit") or ""))
             dims.append(DimensionSpec(name=d["name"], source="llm", bucket=bucket))
         filters = [FilterSpec(field=f.get("field", ""), op=f.get("op", "="),
                               value=f.get("value"), source="llm")
@@ -628,6 +660,8 @@ _COUNT_KW = (("多少次", "次数"), ("调用次数", "调用次数"), ("调用
 
 # "X数/数量"类指标（测试用例数、接口数、任务数量…）+ 数量问词 → 计数语境
 _X_NUM_RE = re.compile(r"([一-龥]{1,10})数(?!据|值|控|学|码|字|组|理|量)")
+# "X数量"（会议数量/用例数量）：X+数量 本身就是明确的计数指标名，不依赖数量问词
+_X_NUM2_RE = re.compile(r"([一-龥]{1,10})数量")
 
 
 def _is_count_context(question: str) -> bool:
@@ -648,6 +682,13 @@ def _count_metric_name(question: str) -> str | None:
     if m and lex_match("num_ask", question):
         name = m.group(1) + "数"
         # 去掉"XX的"定语（"RT项目的测试用例数"→"测试用例数"）
+        if "的" in name:
+            name = name.split("的", 1)[-1]
+        return name
+    m2 = _X_NUM2_RE.search(question)
+    if m2:
+        name = m2.group(1) + "数量"
+        # 去掉"XX的"定语（"会议的会议数量"→"会议数量"）
         if "的" in name:
             name = name.split("的", 1)[-1]
         return name
@@ -854,17 +895,22 @@ def parse_query_spec(question: str, datasource_id: int, workspace_id: int,
                      dicts: dict[str, list[dict]] | None = None,
                      templates: list[dict] | None = None,
                      require_confident: float = 0.6,
-                     schema_name: str | None = None) -> dict:
+                     schema_name: str | None = None,
+                     confirmed_tables: list[str] | None = None) -> dict:
     """意图理解层入口。
 
     返回：
     {"status": "ok", "spec": QuerySpec} |
     {"status": "clarify", "message": "...", "candidates": [...], "missing": [...]} |
     {"status": "refuse", "message": "..."}
+
+    confirmed_tables: 用户已确认的查询表（表澄清勾选后回填轮传入）。
+    非空时，规则引擎与 LLM 抽取指标/维度/时间只允许从确认表字段中选择，
+    避免 Spec 展示与实际查询表脱节（如查"会议"却展示审批表的授权类型字段）。
     """
     from ..database import SessionLocal
     schema = _resolve_schema(datasource_id, question, schema_name)
-    candidates = fetch_schema_candidates(datasource_id, schema)
+    candidates = fetch_schema_candidates(datasource_id, schema, confirmed_tables)
     if not candidates["metrics"] and not candidates["dimensions"]:
         return {"status": "refuse",
                 "message": "当前数据源尚未采集到可查询的表字段（Schema），请先在「数据源」中同步 Schema。"}
@@ -893,7 +939,8 @@ def parse_query_spec(question: str, datasource_id: int, workspace_id: int,
     is_detail_pass = False
     if (llm is not None and llm.configured and not clarify_answer):
         data = _llm_extract_spec(question, datasource_id, llm, prev_spec, schema,
-                                 rewrite_hint=rewritten)
+                                 rewrite_hint=rewritten,
+                                 confirmed_tables=confirmed_tables)
         if data:
             llm_spec = _spec_from_llm_data(data, question, prev_spec)
             if llm_spec and llm_spec.metrics:

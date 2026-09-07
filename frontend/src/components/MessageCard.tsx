@@ -187,12 +187,13 @@ export default function MessageCard({ msg, onSaveQuery, onFeedback, onClarifyCon
   if (msg.role === 'user') {
     return (
       <div style={{ display: 'flex', justifyContent: 'flex-end', margin: '10px 0' }}>
+        {/* 气泡宽度由 CSS 控制：宽屏 80%、窄屏放宽到 92%，保证问题完整可读 */}
         <div
           className="glass-msg-user"
           style={{
-            maxWidth: '80%',
             padding: '9px 15px',
             whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
             color: '#fff',
           }}
         >
