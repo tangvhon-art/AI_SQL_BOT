@@ -6,6 +6,8 @@ from sqlalchemy import create_engine, text
 from ..database import SessionLocal
 from ..models import ColumnMeta, Datasource, Relationship, TableMeta
 
+logger = logging.getLogger(__name__)
+
 # AI_Infra 系统表黑名单：同步业务数据源 Schema 时跳过，避免混入元数据
 _SYSTEM_TABLE_BLACKLIST = frozenset({
     "column_meta", "table_meta", "datasource", "permission_rule", "users", "user", "role",
@@ -59,7 +61,7 @@ def sync_schema(ds: Datasource) -> dict:
     返回统计：{tables, columns, relationships}。"""
     engine = create_engine(build_url(ds), pool_pre_ping=True,
                            connect_args={"connect_timeout": 5} if ds.type == "mysql" else {})
-    stats = {"tables": 0, "columns": 0, "relationships": 0, "dropped_relationships": 0}
+    stats = {"tables": 0, "columns": 0, "relationships": 0, "inferred_relationships": 0, "dropped_relationships": 0}
     try:
         with engine.connect() as conn:
             schema = ds.db_name if ds.type == "mysql" else "public"
@@ -136,15 +138,37 @@ def sync_schema(ds: Datasource) -> dict:
                 for tm in table_map.values():
                     tm.column_count = col_count.get(tm.id, 0)
 
-                # 3) 外键关系（关系图信息）
-                fk_rows = conn.execute(text(
-                    "SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME "
-                    "FROM information_schema.KEY_COLUMN_USAGE "
-                    "WHERE TABLE_SCHEMA = :s AND REFERENCED_TABLE_NAME IS NOT NULL"
-                ), {"s": schema}).fetchall()
-                for tname, cname, ref_tname, ref_cname in fk_rows:
-                    src_t = table_map.get(str(tname))
-                    dst_t = table_map.get(str(ref_tname))
+                # 3) 外键关系（关系图信息）—— MySQL/PostgreSQL 双适配 + 容错
+                fk_rows = []
+                try:
+                    if ds.type == "postgresql":
+                        fk_rows = conn.execute(text(
+                            "SELECT tc.table_name, kcu.column_name, ccu.table_name AS ref_table, "
+                            "ccu.column_name AS ref_col "
+                            "FROM information_schema.table_constraints tc "
+                            "JOIN information_schema.key_column_usage kcu "
+                            "  ON tc.constraint_name = kcu.constraint_name "
+                            "  AND tc.table_schema = kcu.table_schema "
+                            "JOIN information_schema.constraint_column_usage ccu "
+                            "  ON tc.constraint_name = ccu.constraint_name "
+                            "  AND tc.table_schema = ccu.table_schema "
+                            "WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = :s"
+                        ), {"s": schema}).fetchall()
+                    else:
+                        fk_rows = conn.execute(text(
+                            "SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME "
+                            "FROM information_schema.KEY_COLUMN_USAGE "
+                            "WHERE TABLE_SCHEMA = :s AND REFERENCED_TABLE_NAME IS NOT NULL"
+                        ), {"s": schema}).fetchall()
+                except Exception as fk_err:  # noqa: BLE001
+                    logger.warning("外键采集失败（不影响表/字段采集）: %s", fk_err)
+
+                # 表名大小写不敏感映射（部分数据库表名大小写敏感）
+                table_map_ci = {k.lower(): v for k, v in table_map.items()}
+                for row in fk_rows:
+                    tname, cname, ref_tname, ref_cname = row[0], row[1], row[2], row[3]
+                    src_t = table_map.get(str(tname)) or table_map_ci.get(str(tname).lower())
+                    dst_t = table_map.get(str(ref_tname)) or table_map_ci.get(str(ref_tname).lower())
                     if not src_t or not dst_t:
                         continue
                     src_col = (db.query(ColumnMeta)
@@ -158,7 +182,9 @@ def sync_schema(ds: Datasource) -> dict:
                     dup = (db.query(Relationship).execution_options(include_deleted=True)
                            .filter(Relationship.datasource_id == ds.id,
                                    Relationship.src_table_id == src_t.id,
+                                   Relationship.src_col_id == src_col.id,
                                    Relationship.dst_table_id == dst_t.id,
+                                   Relationship.dst_col_id == dst_col.id,
                                    Relationship.source == "fk_auto").first())
                     if not dup:
                         db.add(Relationship(datasource_id=ds.id,
@@ -167,17 +193,141 @@ def sync_schema(ds: Datasource) -> dict:
                                             rel_type="1:N", source="fk_auto", enabled=True))
                         stats["relationships"] += 1
                     else:
-                        dup.src_col_id = src_col.id
-                        dup.dst_col_id = dst_col.id
                         dup.is_deleted = False
 
-                # 4) 清理已不存在的字段级外键关系
-                kept_auto = {(r.src_table_id, r.src_col_id, r.dst_table_id, r.dst_col_id)
-                             for r in db.query(Relationship)
-                             .filter(Relationship.datasource_id == ds.id,
-                                     Relationship.source == "fk_auto").all()}
+                # 3.5) 逻辑外键推断——无物理外键的数据库，根据字段名约定（xxx_id → xxxs.id）推断
+                # 预加载所有表的字段到内存，避免重复查询
+                all_cols_by_table: dict[int, list[ColumnMeta]] = {}
+                for tm in table_map.values():
+                    all_cols_by_table[tm.id] = (db.query(ColumnMeta)
+                                                  .filter(ColumnMeta.table_meta_id == tm.id).all())
+                # 表名索引（小写 → TableMeta）
+                table_name_index: dict[str, TableMeta] = {}
+                for tname, tm in table_map.items():
+                    table_name_index[tname.lower()] = tm
+                # 已存在的物理外键集合（避免重复推断）
+                existing_fk = {(r.src_table_id, r.src_col_id, r.dst_table_id, r.dst_col_id)
+                               for r in db.query(Relationship)
+                               .filter(Relationship.datasource_id == ds.id,
+                                       Relationship.source == "fk_auto").all()}
+                # 先软删除所有旧的推断关系，推断时恢复匹配的（避免残留错误推断）
+                old_inferred = (db.query(Relationship)
+                                .filter(Relationship.datasource_id == ds.id,
+                                        Relationship.source == "inferred",
+                                        Relationship.is_deleted == False).all())
+                for r in old_inferred:
+                    r.is_deleted = True
+                # 用 (src_table_id, src_col_id, dst_table_id) 做旧关系索引，推断时恢复
+                old_inferred_index = {(r.src_table_id, r.src_col_id, r.dst_table_id): r
+                                       for r in old_inferred}
+                # 常见非外键字段前缀（这些字段通常不是表关联外键）
+                _NON_FK_PREFIXES = frozenset({
+                    "guid", "uid", "uuid", "open", "union", "app", "calendar",
+                    "device", "token", "session", "code", "key", "hash",
+                })
+
+                def _find_target_table(pfx: str, src_table_id: int) -> TableMeta | None:
+                    """根据前缀查找目标表：精确匹配优先，业务表后缀次之，词根还原，前缀模糊匹配最后。"""
+                    # 0. 排除备份/日志/历史表（不适合作为关联目标）
+                    def _is_backup(tname: str) -> bool:
+                        return any(k in tname for k in ("_bak", "_log", "_history", "_2024", "_2023",
+                                                          "_2022", "_2021", "_copy", "_tmp", "_test_bak"))
+
+                    # 词根还原（meeting→meet, organization→organ, running→run）
+                    def _stem(w: str) -> str:
+                        for suffix in ("ing", "tion", "ment", "ness", "ity", "ance", "ence"):
+                            if w.endswith(suffix) and len(w) > len(suffix) + 2:
+                                stem = w[:-len(suffix)]
+                                # 双写辅音还原（running→run）
+                                if len(stem) >= 3 and stem[-1] == stem[-2]:
+                                    stem = stem[:-1]
+                                return stem
+                        return w
+
+                    # 待尝试的前缀列表：原前缀 + 词根还原
+                    prefixes_to_try = [pfx]
+                    stemmed = _stem(pfx)
+                    if stemmed != pfx and len(stemmed) >= 3:
+                        prefixes_to_try.append(stemmed)
+
+                    for try_pfx in prefixes_to_try:
+                        # 1. 精确匹配（单数/复数）
+                        candidates = [try_pfx, try_pfx + "s", try_pfx + "es"]
+                        if try_pfx.endswith("y"):
+                            candidates.append(try_pfx[:-1] + "ies")
+                        for cand in candidates:
+                            if cand in table_name_index and not _is_backup(cand):
+                                return table_name_index[cand]
+                        # 2. 业务表后缀优先匹配
+                        _BIZ_SUFFIXES = ("_info", "_record", "_detail", "_list", "_config",
+                                          "_setting", "_type", "_category", "_dict", "_item",
+                                          "_definition", "_def", "_meta", "_data")
+                        for suffix in _BIZ_SUFFIXES:
+                            cand = try_pfx + suffix
+                            if cand in table_name_index and not _is_backup(cand):
+                                return table_name_index[cand]
+
+                    # 3. 前缀模糊匹配（表名以 prefix_ 开头，排除非主表后缀）
+                    _NON_TARGET_SUFFIXES = ("_pad", "_log", "_history", "_bak", "_record_log",
+                                             "_effect", "_restart", "_fail_record", "_statistics")
+                    if len(pfx) >= 3:
+                        best = None
+                        best_len = 999
+                        for tname_lower, tm in table_name_index.items():
+                            if (tname_lower.startswith(pfx + "_") and tname_lower != pfx
+                                    and len(tname_lower) <= len(pfx) * 2.5
+                                    and tm.id != src_table_id
+                                    and not _is_backup(tname_lower)
+                                    and not any(tname_lower.endswith(s) for s in _NON_TARGET_SUFFIXES)):
+                                if len(tname_lower) < best_len:
+                                    best = tm
+                                    best_len = len(tname_lower)
+                        if best:
+                            return best
+                    return None
+
+                inferred_count = 0
+                for src_tm in table_map.values():
+                    for col in all_cols_by_table.get(src_tm.id, []):
+                        cname = col.column_name.lower()
+                        # 匹配 xxx_id 格式（排除纯 id 字段）
+                        if not cname.endswith("_id") or len(cname) <= 3:
+                            continue
+                        prefix = cname[:-3]
+                        # 排除常见非外键字段
+                        if prefix in _NON_FK_PREFIXES:
+                            continue
+                        # 查找目标表
+                        dst_tm = _find_target_table(prefix, src_tm.id)
+                        if not dst_tm:
+                            continue
+                        # 自引用也保留（如 parent_id → 本表.id），但排除纯 id
+                        # 目标表必须有 id 字段
+                        dst_cols = all_cols_by_table.get(dst_tm.id, [])
+                        dst_id_col = next((c for c in dst_cols if c.column_name.lower() == "id"), None)
+                        if not dst_id_col:
+                            continue
+                        # 避免与物理外键重复
+                        fk_key = (src_tm.id, col.id, dst_tm.id, dst_id_col.id)
+                        if fk_key in existing_fk:
+                            continue
+                        # 恢复旧推断关系或新建
+                        old_rel = old_inferred_index.get((src_tm.id, col.id, dst_tm.id))
+                        if old_rel:
+                            old_rel.is_deleted = False
+                            old_rel.dst_col_id = dst_id_col.id
+                        else:
+                            db.add(Relationship(datasource_id=ds.id,
+                                                src_table_id=src_tm.id, src_col_id=col.id,
+                                                dst_table_id=dst_tm.id, dst_col_id=dst_id_col.id,
+                                                rel_type="1:N", source="inferred", enabled=True))
+                        inferred_count += 1
+                stats["inferred_relationships"] = inferred_count
+                logger.info("逻辑外键推断: %d 条（数据源 %s）", inferred_count, ds.name)
+
+                # 4) 清理已不存在的外键关系（按 表+字段 精确匹配）
                 auto_rows = {
-                    (str(tname), str(cname), str(ref_tname), str(ref_cname))
+                    (str(tname).lower(), str(cname).lower(), str(ref_tname).lower(), str(ref_cname).lower())
                     for tname, cname, ref_tname, ref_cname in fk_rows
                 }
                 for rel in db.query(Relationship).filter(
@@ -185,10 +335,15 @@ def sync_schema(ds: Datasource) -> dict:
                         Relationship.source == "fk_auto").all():
                     src_t = db.query(TableMeta).get(rel.src_table_id)
                     dst_t = db.query(TableMeta).get(rel.dst_table_id)
-                    if not src_t or not dst_t:
+                    src_col = db.query(ColumnMeta).get(rel.src_col_id)
+                    dst_col = db.query(ColumnMeta).get(rel.dst_col_id)
+                    if not src_t or not dst_t or not src_col or not dst_col:
+                        rel.is_deleted = True
+                        stats["dropped_relationships"] += 1
                         continue
-                    key = (src_t.table_name, "", dst_t.table_name, "")
-                    if (src_t.table_name, "", dst_t.table_name, "") not in auto_rows:
+                    key = (src_t.table_name.lower(), src_col.column_name.lower(),
+                           dst_t.table_name.lower(), dst_col.column_name.lower())
+                    if key not in auto_rows:
                         rel.is_deleted = True
                         stats["dropped_relationships"] += 1
 

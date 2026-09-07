@@ -17,10 +17,16 @@ from datetime import datetime, timedelta
 from ..llm import LLMError, parse_json_content
 from ..models import Datasource, TableMeta
 from .mapping import (MappingError, fetch_schema_candidates, map_spec_to_schema)
+
 from .query_spec import (INTENT_LABELS, QuerySpec, MetricSpec, DimensionSpec,
-                         FilterSpec, TimeSpec, ActionSpec,
+                         BucketSpec, FilterSpec, TimeSpec, ActionSpec,
                          extract_schema_expr, extract_time_expr,
                          parse_time_expr, spec_from_dict, spec_to_dict)
+
+from .text_utils import tokenize, contains_term
+from .schema_types import is_numeric, is_date, is_system_field, is_id_field
+from .biz_lexicon import match as lex_match, get as lex_get
+from .llm_json import ask as llm_json_ask
 
 logger = logging.getLogger(__name__)
 
@@ -30,16 +36,124 @@ TRIAGE_PROMPT = """你是一个精准的意图分类器。根据用户问题和�
 【分类定义】
 - chat：闲聊、打招呼、文章创作、翻译、写作、编程、通用问答、脑筋急转弯、诗歌、故事、笑话等不依赖企业数据库和业务知识库的任务
 - knowledge：业务知识、规则、流程、制度、操作指南、FAQ 问答（需要检索企业知识库回答，如"XX流程是什么""报销规则"）
-- data：查询或分析数据库中的业务数据（数值查询、对比、榜单、趋势、明细、统计，如"本月销售额""各渠道营收占比""近30天订单量趋势"）
+- data：查询或分析数据库中的业务数据（数值查询、对比、榜单、趋势、明细、统计、分布，如"本月销售额""各渠道营收占比""近30天订单量趋势""文件大小范围分布"）
 
 【判断要点】
-- 出现"统计/分析/趋势/占比/对比/环比/同比/TOP/排名/分布/销售额/订单/用户/销量/营收/金额/数量"等且指向业务数据 → data
-- 出现"流程/规则/制度/怎么办/如何/什么是"且指向业务知识 → knowledge
+- 出现"统计/分析/趋势/占比/对比/环比/同比/TOP/排名/分布/销售额/订单/用户/销量/营收/金额/数量/大小"等且指向业务数据 → data
+- **以"查询/查/统计/看下/分析/列出"等动作开头，且后面跟着具体数据对象（文件/表/记录/报表/明细/数量/金额等）→ data，即使句中含"流程/审批/规则"等限定词**（如"查询审批流程上传文件的大小"→ 要查的是文件数据，不是流程知识）
+- 出现"流程/规则/制度/怎么办/如何/什么是"且**提问对象是知识本身**（如"审批流程是什么""报销流程怎么走"）→ knowledge
 - 不依赖数据的创作、闲聊、通用知识 → chat
 - 多轮追问中"再按月份拆分""环比去年呢"等基于上一次查询的分析 → data
 
 只输出 JSON：{"intent": "chat|knowledge|data"}
 【重要】intent 字段只能是 chat、knowledge、data 三个单词中的一个，不要输出竖线、斜杠、中文或枚举列表。"""
+
+
+# ========== 问题重构（意图识别后、QuerySpec 解析前） ==========
+REWRITE_PROMPT = """你是企业数据问数的问题重构器。用户的问题可能口语化、有歧义、夹带知识库词或负向澄清，请把它改写成「清晰、聚焦、可执行」的规范化问数描述，并提炼结构要素。只输出 JSON。
+
+【改写原则】
+1. 目标唯一：写清「统计对象 + 统计维度 + 统计方式」，删除"帮我看看/能不能/不需要统计X/只需…"等冗余与负向表达（负向信息进 negatives，不进 question）
+2. 实体明确：识别用户所指的业务对象（表/实体）。如"审批流程上传的文件"→ 实体是「审批流程的文件」（要查文件数据，不是查流程知识）
+3. 区分知识词与数据实体："流程/审批/规则"等词出现时，判断它是业务对象限定词（如"审批流程的文件"）还是知识问答（如"审批流程是什么"）；数据问数一律写实体，不写知识词
+4. **拆表（table_hints）**：输出 3-6 个表名/实体检索词，用于后续表检索。**必须同时包含**：① 用户原话中的业务实体词（如"审批流程""文件"——参考 FAQ 意图识别的 keywords 提取）；② 按「业务词 + 常见后缀」推导的表名词（如"审批流程上传的文件"→ 审批文件、审批附件、文件附件、流程附件）。必须来自用户原话中的业务概念，不得凭空发明
+5. 保留派生维度："大小范围/金额区间/年龄段/时间段"等是字段分箱（bucket）维度，必须显式保留在 dimension_hint，不得丢弃
+6. 保留时间与对比：近7天/本月/同比/环比/去年等必须原样保留在 question 中
+7. 不得编造：改写只能用用户原话中的概念，不得发明字段名或数值
+
+【输出 JSON Schema】
+{{
+  "question": "规范化问数描述（一句话，如：查询审批流程的文件表，统计维度：文件大小范围，统计方式：数量分布）",
+  "entities": ["业务实体名"],
+  "table_hints": ["表检索词1", "表检索词2"],
+  "intent_hint": "value|compare|ranking|trend|detail|statistic",
+  "metric_hint": "要统计的量（如：数量/金额/平均值），没有写空串",
+  "dimension_hint": ["分组维度（含范围类派生维度）"],
+  "filters_hint": ["筛选条件，没有则空数组"],
+  "negatives": ["用户明确排除的内容"]
+}}
+
+【示例】
+问题：查询审批流程上传文件的大小，需要文件大小范围的分布图。不需要统计流程，只需要统计文件大小的分布
+输出：
+{{"question": "查询审批流程的文件表，统计维度：文件大小范围，统计方式：数量分布",
+ "entities": ["审批流程文件"],
+ "table_hints": ["审批文件", "审批附件", "文件附件", "流程附件"],
+ "intent_hint": "statistic",
+ "metric_hint": "数量",
+ "dimension_hint": ["文件大小范围"],
+ "filters_hint": [],
+ "negatives": ["不统计流程数量"]}}"""
+
+
+def rewrite_question(question: str, llm) -> dict | None:
+    """问题重构：把口语/歧义/夹带负向澄清的问题改写为规范化问数描述。
+
+    返回 {"question": 规范化描述, "entities": [...], "table_hints": [...],
+          "intent_hint": ..., "metric_hint": ..., "dimension_hint": [...],
+          "filters_hint": [...], "negatives": [...]}；
+    table_hints 为拆表检索词（供选表阶段表名/表注释检索）；
+    失败返回 None（上层回退原始问题）。
+    """
+    if not question or not question.strip():
+        return None
+    try:
+        raw = llm.chat([
+            {"role": "system", "content": REWRITE_PROMPT},
+            {"role": "user", "content": f"【用户问题】\n{question}\n\n请输出上述 JSON Schema 的完整 JSON。"},
+        ], max_tokens=800, temperature=0.1, thinking=False)
+        data = parse_json_content(raw)
+    except (LLMError, Exception) as exc:  # noqa: BLE001
+        logger.warning("问题重构失败，回退原始问题: %s", exc)
+        return None
+    if not isinstance(data, dict) or not str(data.get("question") or "").strip():
+        return None
+    q = str(data["question"]).strip()
+    # 防御：question 字段损坏（LLM 把 JSON 键名/多余字段串进 question 值）→ 回退原始问题，
+    # 避免脏文本污染下游规则引擎/LLM 兜底解析（曾出现 "查询istic metric_hint=数量…" 脏串）
+    _json_key_marker = re.compile(r"\b(metric_hint|dimension_hint|intent_hint|filters_hint|negatives|entities|table_hints|intent|question)\b")
+    if (_json_key_marker.search(q)
+            or q.count('"') > 4 or len(q) > 150):
+        logger.warning("[问数][rewrite] 问题重构返回的 question 字段损坏，回退原问题: %r", q[:60])
+        q = question.strip()
+    # 拆表检索词：LLM 推导表名词 + 原话实体词（entities）+ 问题提取词 融合去重
+    # 参考 UnifiedQA：keywords 直接取原话业务实体（如"审批流程""文件"），
+    # 与推导表名词（"审批文件""流程附件"）合并，四维检索时两类词都能命中表
+    hints = data.get("table_hints") or []
+    if not isinstance(hints, list):
+        hints = []
+    table_hints = [str(h).strip() for h in hints if h and str(h).strip()]
+    for ent in (data.get("entities") or []):
+        e = str(ent).strip()
+        if e and e not in table_hints:
+            table_hints.append(e)
+    # 从原问题提取原话业务实体词兜底/补充（参考 UnifiedQA keywords：如"审批流程""文件"）
+    # 每处业务关键词只提取一个最自然词：优先「关键词+后随业务字」（审批+流程→审批流程），
+    # 否则取关键词本身；避免"查询审批流程上传"类碎词
+    _business_kw = ("文件", "审批", "附件", "订单", "流程", "项目", "用例", "任务",
+                    "记录", "数据", "报告", "薪资", "考勤", "部门", "员工", "接口", "用户")
+    _tail_stop = ("的", "大", "上", "传", "查", "询", "看", "下", "了", "吗", "呢",
+                  "请", "帮", "我", "是", "要", "想", "不", "只", "统计", "分布", "范围")
+    for m in re.finditer("|".join(_business_kw), question):
+        if len(table_hints) >= 8:
+            break
+        kw = m.group()
+        tail_m = re.match(r"[\u4e00-\u9fa5]{1,2}", question[m.end():m.end() + 2])
+        tail = tail_m.group(0) if tail_m else ""
+        if tail and all(ch in _tail_stop for ch in tail):
+            tail = ""  # 后随"的/大/上传"等非业务字 → 不吞（"文件的大"→"文件"）
+        cand = (kw + tail)[:4]
+        if cand not in table_hints:
+            table_hints.append(cand)
+    table_hints = table_hints[:8]
+    data["table_hints"] = table_hints
+    data["question"] = q
+    if q == question.strip():
+        # 模型未改写（已足够规范）：不覆盖原始问题，避免画蛇添足
+        return {"question": q, "entities": [], "table_hints": table_hints,
+                "intent_hint": "", "metric_hint": "", "dimension_hint": [],
+                "filters_hint": [], "negatives": []}
+    return data
 
 
 def detect_intent(question: str, history: list[dict], llm) -> str:
@@ -69,14 +183,16 @@ def detect_intent(question: str, history: list[dict], llm) -> str:
         # 模型偶发回显枚举串（如 "chat|knowledge|data" / "chat,data"），按问题信号兜底
         logger.warning("意图分诊返回未知值: %s，按问题信号兜底", intent)
         q = question or ""
+        # 数据信号优先：查询/统计动作 + 具体数据对象 → data（即使含"流程/审批/规则"限定词）
+        if any(k in q for k in ("查询", "查一下", "查查", "统计", "分析", "数据", "报表",
+                                "多少", "分布", "占比", "趋势", "数量", "金额", "销量",
+                                "营收", "环比", "同比", "上月", "本月", "上周", "本周",
+                                "排名", "明细", "列表", "合计", "均值", "大小", "文件",
+                                "记录", "明细", "清单")):
+            return "data"
         if any(k in q for k in ("流程", "规则", "制度", "怎么办", "如何", "指南", "步骤",
                                 "操作", "什么是", "报销", "审批")):
             return "knowledge"
-        if any(k in q for k in ("查", "多少", "统计", "分析", "数据", "报表", "销售", "订单",
-                                "用户", "趋势", "占比", "榜单", "销量", "营收", "金额", "数量",
-                                "环比", "同比", "同期", "上月", "本月", "上周", "本周",
-                                "排名", "明细", "列表", "合计", "均值")):
-            return "data"
         return "chat"
     except (LLMError, Exception) as exc:  # noqa: BLE001
         logger.warning("意图分诊失败: %s，默认 data", exc)
@@ -130,17 +246,8 @@ _FILTER_PATTERNS = [
     (re.compile(r"未([\u4e00-\u9fa5]{1,6})"), "!="),
 ]
 
-_STATUS_WORDS = ("已完成", "未完成", "已付款", "未付款", "已支付", "未支付", "待审核",
-                 "已审核", "已发货", "待发货", "线下", "线上", "有效", "无效",
-                 "启用", "停用", "成功", "失败", "正常", "异常")
-
-# 明细/清单类的强指标词与强分组词：查询主体词（如 项目/接口/用例）不得误配为指标或维度
-_DETAIL_METRIC_KW = ("金额", "价格", "费用", "成本", "利润", "数量", "次数", "人数",
-                     "总量", "总数", "合计", "均值", "平均", "占比", "比例",
-                     "时长", "大小", "重量", "收入", "支出", "余额")
+# 明细指标字符级检查（biz_lexicon 管理词表，此处仅保留字符级判断逻辑）
 _DETAIL_METRIC_CHAR = ("数", "量", "额", "率", "价")
-_DETAIL_DIM_KW = ("类型", "状态", "渠道", "地区", "城市", "省份", "部门", "类别",
-                  "平台", "来源", "名称", "方式", "层级", "分组", "级别", "行业")
 
 
 def _detect_intent(question: str, action: ActionSpec) -> str:
@@ -339,7 +446,7 @@ def _extract_filters(question: str, candidates: dict) -> list[FilterSpec]:
                         filters.append(FilterSpec(field=field_name, op=op, value=value,
                                                   source="rule"))
     # 状态词：已完成/未付款等 → 匹配维度字段
-    for w in _STATUS_WORDS:
+    for w in lex_get("status"):
         if w in question:
             field = _match_filter_field("状态", candidates) or _match_filter_field("类型", candidates)
             if field:
@@ -382,15 +489,16 @@ SPEC_EXTRACT_PROMPT = """你是企业数据问数意图解析器。把用户问�
 {{
   "intent": "value|compare|ranking|trend|detail|statistic",
   "metrics": [{{"name": "指标名(用上面可选中英文名或注释)", "agg": "sum"}}],
-  "dimensions": [{{"name": "维度名"}}],
+  "dimensions": [{{"name": "维度名", "bucket": {{"field": "分箱字段名(可省)", "ranges": [[下界,上界],...], "labels": ["区间标签",...], "unit": "单位"}}}}],
   "filters": [{{"field": "条件字段", "op": "=/!=/>/</>=/<=", "value": 值}}],
   "time_expr": "时间表达原文，如 本月/近7天/2026年8月，没有则留空",
   "action": {{"top_n": null, "sort": null, "compare_target": null, "stat": null}}
 }}
 
 【规则】
-- intent：趋势/逐月→trend；同比/环比/对比→compare；排名/前N→ranking；明细/列表→detail；占比/比例/构成→statistic；**每个/各个/分别/各 + 维度 + 数量/数值（分组统计，如"各项目用例数分别是多少"）→statistic**；其余单值数值→value
+- intent：趋势/逐月→trend；同比/环比/对比→compare；排名/前N→ranking；明细/列表→detail；占比/比例/构成→statistic；**每个/各个/分别/各 + 维度 + 数量/数值（分组统计，如"各项目用例数分别是多少"）→statistic；范围/区间/分布（如"文件大小范围的分布"）→statistic**；其余单值数值→value
 - 指标和维度必须从【可选指标】【可选维度】中选择（可用中文注释或英文字段名），禁止编造
+- **分箱维度（bucket）**：仅当维度语义是"范围/区间"（大小范围/金额区间/年龄段/时长区间）时输出 bucket；ranges 用合理业务边界（按用户原话或常见分档），labels 与 ranges 一一对应（如 ["0-1MB","1-10MB","10MB以上"]），unit 填单位；字段不在此列可留空 field
 - compare 时 action.compare_target：环比=mom、同比=yoy、维度对比=dim
 - 用户问题若未提及时间，time_expr 留空
 - 多轮追问（如"环比去年呢""按渠道拆分呢"）时，依据上一轮 QuerySpec 继承指标/维度，只改时间或加维度"""
@@ -398,7 +506,8 @@ SPEC_EXTRACT_PROMPT = """你是企业数据问数意图解析器。把用户问�
 
 def _llm_extract_spec(question: str, datasource_id: int, llm,
                       prev_spec: QuerySpec | None,
-                      schema_name: str | None = None) -> dict | None:
+                      schema_name: str | None = None,
+                      rewrite_hint: dict | None = None) -> dict | None:
     candidates = fetch_schema_candidates(datasource_id, schema_name)
     schema_scope = f"【查询范围 schema】{schema_name}" if schema_name else ""
     metrics_hint = "；".join(f"{m['comment'] or m['column']}({m['column']}, {m['table']})"
@@ -410,21 +519,36 @@ def _llm_extract_spec(question: str, datasource_id: int, llm,
     prev_text = ""
     if prev_spec:
         prev_text = f"\n【上一轮 QuerySpec】{json.dumps(spec_to_dict(prev_spec), ensure_ascii=False)}"
-    user_prompt = (f"{schema_scope}\n{prev_text}\n\n【用户问题】{question}\n\n"
+    # 问题重构的提炼结果作为软提示注入（仅首轮），帮助 LLM 聚焦统计对象/维度/方式
+    hint_text = ""
+    if rewrite_hint:
+        hint_parts = []
+        if rewrite_hint.get("intent_hint"):
+            hint_parts.append(f"意图参考={rewrite_hint['intent_hint']}")
+        if rewrite_hint.get("metric_hint"):
+            hint_parts.append(f"统计量参考={rewrite_hint['metric_hint']}")
+        if rewrite_hint.get("dimension_hint"):
+            hint_parts.append(f"分组维度参考={'、'.join(rewrite_hint['dimension_hint'])}")
+        if rewrite_hint.get("filters_hint"):
+            hint_parts.append(f"筛选条件参考={'、'.join(str(x) for x in rewrite_hint['filters_hint'])}")
+        if hint_parts:
+            hint_text = f"\n【问题重构提示（供参考，指标/维度仍需从可选列表选择）】\n{'；'.join(hint_parts)}"
+    user_prompt = (f"{schema_scope}\n{prev_text}\n{hint_text}\n\n【用户问题】{question}\n\n"
                    f"请输出上述 JSON Schema 的完整 JSON。")
-    try:
-        raw = llm.chat([
-            {"role": "system", "content": SPEC_EXTRACT_PROMPT.format(
-                metrics_hint=metrics_hint, dims_hint=dims_hint, times_hint=times_hint)},
-            {"role": "user", "content": user_prompt},
-        ], max_tokens=1600, temperature=0.1, thinking=False)
-        data = parse_json_content(raw)
-    except (LLMError, Exception) as exc:  # noqa: BLE001
-        logger.warning("LLM 意图解析失败: %s", exc)
-        return None
-    if not isinstance(data, dict):
-        return None
-    return data
+    system = SPEC_EXTRACT_PROMPT.format(
+        metrics_hint=metrics_hint, dims_hint=dims_hint, times_hint=times_hint)
+    data = llm_json_ask(llm, system, user_prompt, max_tokens=1600, max_retries=1)
+    return data if isinstance(data, dict) else None
+
+
+def _is_junk_field_name(name: str) -> bool:
+    """过滤 LLM 兜底解析混入的脏字段名（schema 引导文本/超长串），避免污染指标与维度。"""
+    n = (name or "").strip()
+    if not n or len(n) > 20:
+        return True
+    if re.search(r"(维度\s*0|指标\s*[0-9]|模板\s*[0-9]|全局\s*[0-9])", n):
+        return True
+    return False
 
 
 def _spec_from_llm_data(data: dict, question: str, prev_spec: QuerySpec | None) -> QuerySpec | None:
@@ -433,9 +557,20 @@ def _spec_from_llm_data(data: dict, question: str, prev_spec: QuerySpec | None) 
         if intent not in INTENT_LABELS:
             intent = "value"
         metrics = [MetricSpec(name=m.get("name", ""), agg=m.get("agg", "sum"), source="llm")
-                   for m in (data.get("metrics") or []) if m.get("name")]
-        dims = [DimensionSpec(name=d.get("name", ""), source="llm")
-                for d in (data.get("dimensions") or []) if d.get("name")]
+                   for m in (data.get("metrics") or [])
+                   if m.get("name") and not _is_junk_field_name(m["name"])]
+        dims = []
+        for d in (data.get("dimensions") or []):
+            if not d.get("name") or _is_junk_field_name(d["name"]):
+                continue
+            bucket = None
+            b = d.get("bucket") or {}
+            if isinstance(b, dict) and b.get("ranges"):
+                bucket = BucketSpec(field=str(b.get("field") or ""),
+                                    ranges=b["ranges"],
+                                    labels=[str(x) for x in (b.get("labels") or [])],
+                                    unit=str(b.get("unit") or ""))
+            dims.append(DimensionSpec(name=d["name"], source="llm", bucket=bucket))
         filters = [FilterSpec(field=f.get("field", ""), op=f.get("op", "="),
                               value=f.get("value"), source="llm")
                    for f in (data.get("filters") or []) if f.get("field")]
@@ -493,16 +628,13 @@ _COUNT_KW = (("多少次", "次数"), ("调用次数", "调用次数"), ("调用
 
 # "X数/数量"类指标（测试用例数、接口数、任务数量…）+ 数量问词 → 计数语境
 _X_NUM_RE = re.compile(r"([一-龥]{1,10})数(?!据|值|控|学|码|字|组|理|量)")
-_NUM_ASK_WORDS = ("多少", "几个", "几条", "分别", "各个", "各", "总共", "一共", "总计", "总数", "总共有")
-_CNT_CTX_KW = ("次数", "多少个", "多少条", "几条", "数量", "调用量", "访问量",
-               "请求数", "请求次数", "被调用", "执行次数", "命中次数", "总数", "总共有")
 
 
 def _is_count_context(question: str) -> bool:
     """是否计数语境：命中强计数词，或"X数/数量"类指标词 + 数量问词。"""
-    if any(k in question for k in _CNT_CTX_KW):
+    if lex_match("count_context", question):
         return True
-    if _X_NUM_RE.search(question) and any(w in question for w in _NUM_ASK_WORDS):
+    if _X_NUM_RE.search(question) and lex_match("num_ask", question):
         return True
     return False
 
@@ -513,7 +645,7 @@ def _count_metric_name(question: str) -> str | None:
         if kw in question:
             return name
     m = _X_NUM_RE.search(question)
-    if m and any(w in question for w in _NUM_ASK_WORDS):
+    if m and lex_match("num_ask", question):
         name = m.group(1) + "数"
         # 去掉"XX的"定语（"RT项目的测试用例数"→"测试用例数"）
         if "的" in name:
@@ -587,12 +719,14 @@ def _rule_extract_spec(question: str, candidates: dict,
     # 明细/清单类：查询主体词（项目/接口/用例等）会被误配为指标/维度，按强词过滤，
     # 展示字段交由 L3 LLM 字段检索从表结构中按问题选择（R7）
     if spec.intent == "detail":
+        _detail_metric_kw = lex_get("detail_metric")
+        _detail_dim_kw = lex_get("detail_dim")
         spec.metrics = [m for m in spec.metrics
-                        if any(k in (m.name or "") for k in _DETAIL_METRIC_KW)
+                        if any(k in (m.name or "") for k in _detail_metric_kw)
                         or any(k in (m.name or "") for k in _DETAIL_METRIC_CHAR)]
         _ENUM_PAT = re.compile(r"[A-Za-z_]+-[^，,;；\s]+")
         spec.dimensions = [d for d in spec.dimensions
-                           if any(k in (d.name or "") for k in _DETAIL_DIM_KW)
+                           if any(k in (d.name or "") for k in _detail_dim_kw)
                            and len(_ENUM_PAT.findall(d.name or "")) < 2]
     # 统计子类型
     if spec.intent == "statistic":
@@ -735,9 +869,53 @@ def parse_query_spec(question: str, datasource_id: int, workspace_id: int,
         return {"status": "refuse",
                 "message": "当前数据源尚未采集到可查询的表字段（Schema），请先在「数据源」中同步 Schema。"}
 
-    # 规则引擎
-    spec = _rule_extract_spec(question, candidates, dicts or {})
-    spec.schema = schema or ""
+    # 问题重构（仅首轮、未点选澄清时，LLM 可用才执行）：
+    # 消歧 / 吸收负向澄清 / 提炼业务实体与派生维度 → 规范化问数描述，
+    # 后续规则引擎与 LLM 解析均基于重构后文本，提升 QuerySpec 准确率与 SQL 生成可行性。
+    raw_question = question
+    rewritten: dict | None = None
+    if (prev_spec is None and clarify_answer is None
+            and llm is not None and llm.configured):
+        rewritten = rewrite_question(question, llm)
+        if rewritten:
+            logger.info("[问数][rewrite] 问题重构: %r → %r | intent_hint=%s metric_hint=%s "
+                        "dimension_hint=%s negatives=%s",
+                        raw_question[:60], str(rewritten.get("question"))[:80],
+                        rewritten.get("intent_hint"), rewritten.get("metric_hint"),
+                        rewritten.get("dimension_hint"), rewritten.get("negatives"))
+    if rewritten and str(rewritten.get("question") or "").strip():
+        question = str(rewritten["question"]).strip()
+    else:
+        logger.info("[问数][rewrite] 未重构（无LLM/多轮追问/澄清点选/模型未改写），沿用原问题")
+
+    # LLM 优先（L-A 层）：意图/spec 抽取交 LLM，规则为兜底
+    _guidance_source = "rule_fallback"
+    is_detail_pass = False
+    if (llm is not None and llm.configured and not clarify_answer):
+        data = _llm_extract_spec(question, datasource_id, llm, prev_spec, schema,
+                                 rewrite_hint=rewritten)
+        if data:
+            llm_spec = _spec_from_llm_data(data, question, prev_spec)
+            if llm_spec and llm_spec.metrics:
+                spec = llm_spec
+                spec.schema = schema or ""
+                _guidance_source = "llm"
+                if spec.time.start == "" or spec.time.expr == "近30天（默认）":
+                    _extract_time(question, spec)
+                logger.info("[问数][spec] LLM 主导解析: intent=%s metrics=%s dims=%s | source=%s",
+                            spec.intent, [(m.name, m.agg) for m in spec.metrics],
+                            [d.name for d in spec.dimensions], _guidance_source)
+            else:
+                logger.warning("[问数][spec] LLM 返回空/无效，回退规则引擎")
+                spec = _rule_extract_spec(question, candidates, dicts or {})
+                spec.schema = schema or ""
+        else:
+            spec = _rule_extract_spec(question, candidates, dicts or {})
+            spec.schema = schema or ""
+    else:
+        # 无 LLM 或澄清轮次 → 规则引擎（L-C 兜底）
+        spec = _rule_extract_spec(question, candidates, dicts or {})
+        spec.schema = schema or ""
 
     # 多轮继承（规则路径）：省略式追问
     if prev_spec and not spec.metrics and spec.intent == "value":
@@ -756,38 +934,8 @@ def parse_query_spec(question: str, datasource_id: int, workspace_id: int,
     if clarify_answer:
         _merge_clarify_answer(spec, clarify_answer, candidates, dicts or {})
 
-    # 明细/清单类无指标是正常形态（如"有哪些接口"）：不澄清、不强制抽取，
-    # 放行至 L3 由 LLM 字段检索选展示字段（analyzer 空列 → AnalysisError → nl2sql）
     is_detail_pass = spec.intent == "detail" and not spec.metrics
 
-    # 指标缺失 → LLM 兜底 → 仍缺失则澄清
-    if not spec.metrics and not is_detail_pass and llm is not None and llm.configured:
-        data = _llm_extract_spec(question, datasource_id, llm, prev_spec, schema)
-        if data:
-            llm_spec = _spec_from_llm_data(data, question, prev_spec)
-            if llm_spec and llm_spec.metrics:
-                # 规则结果与 LLM 结果合并（规则可信的保留）
-                spec = llm_spec
-                spec.schema = schema or ""
-                if spec.time.start == "" or spec.time.expr == "近30天（默认）":
-                    _extract_time(question, spec)
-
-    if not spec.metrics and not is_detail_pass:
-        # 低置信度/参数缺失 → 澄清候选
-        cand_metrics = [{"name": m["comment"] or m["column"], "column": m["column"],
-                         "table": m["table"]}
-                        for m in candidates["metrics"][:10]]
-        return {"status": "clarify",
-                "message": "请选择您要查询的指标（可多选）：",
-                "candidates": cand_metrics, "missing": ["指标"]}
-
-    # 低置信度拦截
-    if spec.confidence < require_confident and not clarify_answer and not is_detail_pass:
-        return {"status": "clarify",
-                "message": "我还没完全理解您的问题，请确认以下要素（或换个说法）：",
-                "candidates": [{"name": m["comment"] or m["column"], "column": m["column"],
-                                "table": m["table"]} for m in candidates["metrics"][:10]],
-                "missing": spec.missing}
     # 统一后处理：分组统计纠正（规则/LLM 路径均生效）
     _group_kw = ("每个", "各个", "分别", "各项目", "各渠道", "各地区", "各部门", "各类型", "各状态")
     if spec.intent == "value" and any(k in question for k in _group_kw):
@@ -800,4 +948,12 @@ def parse_query_spec(question: str, datasource_id: int, workspace_id: int,
                     spec.dimensions = [DimensionSpec(name=_dim_name, source="rule")]
                     break
 
-    return {"status": "ok", "spec": spec}
+    # 溯源：原始问题 + 问题重构后的规范化描述
+    spec.original_question = raw_question
+    if rewritten:
+        spec.rewritten_question = question
+        spec.table_hints = [h for h in (rewritten.get("table_hints") or []) if h]
+        if spec.table_hints:
+            logger.info("[问数][spec] 拆表检索词 %s 注入 spec", spec.table_hints)
+
+    return {"status": "ok", "spec": spec, "guidance_source": _guidance_source}

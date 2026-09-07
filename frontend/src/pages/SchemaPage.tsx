@@ -54,6 +54,19 @@ export default function SchemaPage() {
     }
   }
 
+  const updateTableComment = async (tableId: number, comment: string) => {
+    try {
+      await client.put(`/datasources/tables/${tableId}/comment`, { comment })
+      msgApi.success('表注释已保存')
+      setTables((ts) => ts.map((t) => (t.id === tableId ? { ...t, comment } : t)))
+      if (selected?.id === tableId) {
+        setSelected((s) => s ? { ...s, comment } : s)
+      }
+    } catch (e) {
+      toastError(e)
+    }
+  }
+
   const addRel = async () => {
     const v = await form.validateFields()
     try {
@@ -129,7 +142,15 @@ export default function SchemaPage() {
                   columns={[
                     { title: '表名', dataIndex: 'table_name', render: (v: string, r) => (
                       <Button type="link" onClick={() => setSelected(r)}>{v}</Button>) },
-                    { title: '表注释', dataIndex: 'comment' },
+                    { title: '表注释（可编辑）', dataIndex: 'comment', render: (v: string, r) => (
+                      <Input
+                        size="small"
+                        defaultValue={v}
+                        placeholder="点击编辑表注释"
+                        onBlur={(e) => { if (e.target.value !== v) updateTableComment(r.id, e.target.value) }}
+                        style={{ minWidth: 200 }}
+                      />
+                    ) },
                     { title: '类型', dataIndex: 'table_type', render: (v) => <Tag>{v}</Tag> },
                     { title: '字段数', dataIndex: 'column_count' },
                   ]}
@@ -184,7 +205,9 @@ export default function SchemaPage() {
                     { title: '目标表.字段', render: (_, r) => <code>{r.dst_table}.{r.dst_col}</code> },
                     { title: '类型', dataIndex: 'rel_type' },
                     { title: '来源', dataIndex: 'source', render: (v) => (
-                      <Tag color={v === 'fk_auto' ? 'blue' : 'green'}>{v === 'fk_auto' ? '外键自动' : '手动'}</Tag>) },
+                      <Tag color={v === 'fk_auto' ? 'blue' : v === 'inferred' ? 'orange' : 'green'}>
+                        {v === 'fk_auto' ? '外键自动' : v === 'inferred' ? '逻辑推断' : '手动'}
+                      </Tag>) },
                     { title: '操作', render: (_, r) => (
                       <Popconfirm title="删除该关系？" onConfirm={() => delRel(r.id)}>
                         <Button size="small" danger>删除</Button>

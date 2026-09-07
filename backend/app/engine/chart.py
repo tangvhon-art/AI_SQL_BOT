@@ -1,10 +1,25 @@
-"""图表引擎：结果特征分析 → 类型推荐 → 标准 ECharts option。
-支持 metric / line / area / bar / stacked_bar / grouped_bar / pie / table。"""
+"""图表引擎：AI 推荐图表类型 → 规则兜底 → 标准 ECharts option。
+
+L-A: LLM 根据意图 + 数据形态推荐图表类型
+L-C: 规则兜底（数据形态推断），使用公共模块判断类型/语义
+"""
+from __future__ import annotations
+
+import logging
 from typing import Any
+
+from .schema_types import is_time_field, looks_date, is_numeric as _is_num_type
+from .biz_lexicon import match as lex_match
+from .llm_json import ask as llm_json_ask
+
+logger = logging.getLogger(__name__)
+
+_VALID_CHART_TYPES = frozenset({
+    "metric", "line", "area", "bar", "stacked_bar", "grouped_bar", "pie", "table",
+})
 
 
 def _to_number(v: Any) -> float | None:
-    """将 int/float/Decimal/数字字符串转为 float；bool、非数字字符串、None 返回 None。"""
     if isinstance(v, bool):
         return None
     if isinstance(v, (int, float)):
@@ -27,26 +42,57 @@ def _numeric_ratio(rows: list[list[Any]], col_idx: int) -> float:
     return sum(1 for r in rows if col_idx < len(r) and _is_numeric(r[col_idx])) / len(rows)
 
 
-def _looks_date(v: Any) -> bool:
-    s = str(v)
-    if len(s) >= 8 and s[:4].isdigit() and s[4:6].isdigit():
-        return True
-    return "-" in s and s.split("-")[0].isdigit()
+# ────────────── L-A: LLM 图表类型推荐 ──────────────
+
+def _llm_recommend_chart_type(columns: list[str], rows: list[list[Any]],
+                              intent: str | None, llm: Any) -> str | None:
+    """LLM 根据意图 + 列名 + 数据预览推荐图表类型。
+
+    返回有效 chart_type 或 None（降级到规则兜底）。
+    """
+    if llm is None or not getattr(llm, "configured", False):
+        return None
+
+    preview_rows = rows[:5]
+    preview = "\n".join(
+        " | ".join(str(c) for c in r) for r in preview_rows
+    ) if preview_rows else "（无数据）"
+
+    system = (
+        "你是数据可视化专家。根据用户查询意图、列名和数据预览，推荐最合适的图表类型。\n"
+        "可选类型：metric（单一数值指标）、line（折线趋势）、area（面积趋势）、"
+        "bar（柱状对比）、stacked_bar（堆叠柱状）、grouped_bar（分组柱状）、"
+        "pie（饼图占比）、table（明细表格）。\n"
+        "规则：单行单列→metric；时间序列→line/area；占比构成→pie；分类对比→bar；"
+        "多指标对比→grouped_bar；明细列表→table。\n"
+        '严格输出 JSON：{"chart_type": "类型名", "reason": "简短理由"}'
+    )
+    user = (
+        f"查询意图：{intent or '未指定'}\n"
+        f"列名：{', '.join(columns)}\n"
+        f"数据预览（前{len(preview_rows)}行）：\n{preview}\n"
+        f"总行数：{len(rows)}"
+    )
+
+    data = llm_json_ask(llm, system, user, max_tokens=300, temperature=0.0)
+    if not data:
+        return None
+    ct = (data.get("chart_type") or "").strip().lower()
+    if ct in _VALID_CHART_TYPES:
+        logger.debug("[chart] LLM 推荐: %s (%s)", ct, data.get("reason", ""))
+        return ct
+    logger.warning("[chart] LLM 返回无效类型 %r, 降级规则兜底", ct)
+    return None
 
 
-def _date_hints(col: str) -> bool:
-    c = col.lower()
-    return any(k in c for k in ("date", "time", "day", "month", "year")) or \
-        any(k in col for k in ("日期", "时间", "月", "年"))
+# ────────────── L-C: 规则兜底（rule_fallback） ──────────────
 
+def _rule_fallback_chart_type(columns: list[str], rows: list[list[Any]],
+                              intent: str | None = None) -> str:
+    """规则兜底：数据形态推断图表类型（无 LLM 或 LLM 失败时使用）。
 
-def _ratio_hints(col: str) -> bool:
-    c = col.lower()
-    return any(k in c for k in ("rate", "ratio", "percent", "pct", "proportion", "share")) or \
-        any(k in col for k in ("占比", "比例", "百分比", "构成"))
-
-
-def _guess_chart_type(columns: list[str], rows: list[list[Any]]) -> str:
+    使用公共模块 schema_types / biz_lexicon 替代散落的类型判断。
+    """
     if not rows or len(rows) == 0:
         return "table"
     n_cols = len(columns)
@@ -55,15 +101,14 @@ def _guess_chart_type(columns: list[str], rows: list[list[Any]]) -> str:
         return "metric" if n_rows == 1 else "table"
 
     first = rows[0][0]
-    has_date = _date_hints(columns[0]) or _looks_date(first)
+    has_date = is_time_field(columns[0], "", "") or looks_date(first)
 
-    # 数值指标列（第 2 列起）
     metric_cols = [i for i in range(1, n_cols) if _numeric_ratio(rows, i) >= 0.5]
     has_numeric = len(metric_cols) > 0
 
-    # 饼图：2 列（维度+数值），且指标列含占比语义 或 数值总和接近 100（强信号）
+    # 饼图：2 列（维度+数值），且指标列含占比语义 或 数值总和接近 100
     if n_cols == 2 and has_numeric:
-        if _ratio_hints(columns[1]):
+        if lex_match("ratio", columns[1]):
             return "pie"
         total = sum(r[1] for r in rows if _is_numeric(r[1]))
         if 80 <= total <= 120 and n_rows <= 15:
@@ -71,7 +116,6 @@ def _guess_chart_type(columns: list[str], rows: list[list[Any]]) -> str:
 
     # 时间序列
     if has_date and has_numeric:
-        # 多指标时间趋势 → 面积图（更直观展示累积/趋势）
         if len(metric_cols) >= 2:
             return "area"
         return "line"
@@ -80,7 +124,6 @@ def _guess_chart_type(columns: list[str], rows: list[list[Any]]) -> str:
     if has_numeric:
         if n_cols == 2:
             return "bar"
-        # 多指标分组：指标列≥2 且维度基数少 → 堆叠柱状图（展示构成）
         if len(metric_cols) >= 2 and n_rows <= 12:
             return "stacked_bar"
         return "grouped_bar"
@@ -88,62 +131,30 @@ def _guess_chart_type(columns: list[str], rows: list[list[Any]]) -> str:
     return "table"
 
 
-# 意图 → 图表类型映射（意图优先，形状兜底）
-_INTENT_CHART: dict[str, str] = {
-    "value": "metric",
-    "trend": "line",
-    "ranking": "bar",
-    "compare": "bar",
-    "statistic": "pie",
-    "detail": "table",
-}
-
-
-def _intent_chart_type(intent: str | None, columns: list[str],
-                       rows: list[list[Any]]) -> str | None:
-    """按意图选图表：数据形态不支持时返回 None（交给形状兜底）。"""
-    if not intent or intent not in _INTENT_CHART:
-        return None
-    want = _INTENT_CHART[intent]
-    n = len(rows) if rows else 0
-    nc = len(columns)
-    if want == "metric":
-        return "metric" if n == 1 and nc == 1 else None
-    if want == "pie":
-        # 占比：维度+数值 或 数据含 占比 列；多指标列（≥2数值列）走分组柱状图而非饼图
-        if nc >= 2 and n >= 2:
-            metric_cols = [i for i in range(1, nc) if _numeric_ratio(rows, i) >= 0.5]
-            if len(metric_cols) >= 2:
-                return "grouped_bar"
-            if _ratio_hints(columns[-1]):
-                return "pie"
-            return "bar"
-        return None
-    if want == "line":
-        if n >= 2 and nc >= 2:
-            return "area" if nc >= 3 else "line"
-        return None
-    if want == "bar":
-        if n >= 1 and nc >= 2:
-            return "stacked_bar" if (nc >= 3 and n <= 12) else ("grouped_bar" if nc >= 3 else "bar")
-        return None
-    if want == "table":
-        return "table"
-    return None
-
-
 def build_chart_option(columns: list[str], rows: list[list[Any]],
                        chart_type: str | None = None,
-                       intent: str | None = None) -> dict:
-    """生成 ECharts option（数据行列已由后端限制 ≤1000）。所有分支均携带 columns/rows 供表格视图渲染。
-    策略：意图优先（intent 参数）→ 形状兜底（chart_type=None 时自动推断）。"""
+                       intent: str | None = None,
+                       llm: Any = None) -> dict:
+    """生成 ECharts option。
+
+    策略：chart_type 显式指定 → LLM 推荐（intent+数据形态）→ 规则兜底。
+    所有分支均携带 columns/rows 供表格视图渲染。
+    返回 dict 含 _source 字段标识图表类型来源（explicit / llm / rule_fallback）。
+    """
     if not columns or not rows:
-        return {"type": "table", "columns": columns, "rows": rows}
+        return {"type": "table", "columns": columns, "rows": rows, "_source": "rule_fallback"}
+
     ctype = chart_type
+    source = "explicit"
     if not ctype:
-        ctype = _intent_chart_type(intent, columns, rows)
+        # L-A: LLM 推荐
+        ctype = _llm_recommend_chart_type(columns, rows, intent, llm)
+        if ctype:
+            source = "llm"
     if not ctype:
-        ctype = _guess_chart_type(columns, rows)
+        # L-C: 规则兜底
+        ctype = _rule_fallback_chart_type(columns, rows, intent)
+        source = "rule_fallback"
 
     if ctype == "metric":
         return {
@@ -152,10 +163,10 @@ def build_chart_option(columns: list[str], rows: list[list[Any]],
             "label": columns[0],
             "columns": columns,
             "rows": rows,
+            "_source": source,
         }
 
     if ctype == "pie":
-        # 饼图：第一列维度名，第二列数值
         x_col, y_col = columns[0], columns[1]
         data = [{"name": str(r[0]), "value": _to_number(r[1]) or 0}
                 for r in rows if len(r) >= 2]
@@ -177,6 +188,7 @@ def build_chart_option(columns: list[str], rows: list[list[Any]],
             },
             "columns": columns,
             "rows": rows,
+            "_source": source,
         }
 
     if ctype in ("line", "bar", "grouped_bar", "stacked_bar", "area"):
@@ -212,6 +224,7 @@ def build_chart_option(columns: list[str], rows: list[list[Any]],
             },
             "columns": columns,
             "rows": rows,
+            "_source": source,
         }
 
-    return {"type": "table", "columns": columns, "rows": rows}
+    return {"type": "table", "columns": columns, "rows": rows, "_source": source}

@@ -33,10 +33,25 @@ class MetricSpec(BaseModel):
     source: str = "user"           # user/llm/dict
 
 
+class BucketSpec(BaseModel):
+    """分箱维度（范围分布）：如「文件大小范围」= 对 size 字段按区间分组（直方图）。
+
+    - field：分箱目标字段名（SPEC 阶段可为空，mapping 阶段解析为真实列）
+    - ranges/labels：区间边界与标签一一对应，如 [[0,1048576],...] ↔ ["0-1MB",...]
+    - left_closed：左闭右开（默认），生成 CASE WHEN v>=a AND v<b
+    """
+    field: str = ""
+    ranges: list[list[float]] = Field(default_factory=list)  # [[min, max], ...]
+    labels: list[str] = Field(default_factory=list)          # 与 ranges 一一对应
+    unit: str = ""                                            # KB/MB/元/天
+    left_closed: bool = True
+
+
 class DimensionSpec(BaseModel):
     name: str = ""
     alias: str = ""
     granularity: str | None = None  # day/week/month/quarter/year
+    bucket: BucketSpec | None = None  # 范围分布/分箱维度
     source: str = "user"
 
 
@@ -74,7 +89,9 @@ class QuerySpec(BaseModel):
     action: ActionSpec = Field(default_factory=ActionSpec)
     confidence: float = 0.5
     missing: list[str] = Field(default_factory=list)  # 缺失要素（触发澄清依据）
-    original_question: str = ""
+    original_question: str = ""       # 用户原始问题（溯源）
+    rewritten_question: str = ""      # 问题重构后的规范化描述（溯源，空=未重构）
+    table_hints: list[str] = Field(default_factory=list)  # 拆表检索词（问题重构提取，供选表阶段表检索）
     inherited_from: dict[str, Any] = Field(default_factory=dict)  # 多轮继承标注
 
 

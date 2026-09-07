@@ -12,14 +12,11 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from .text_utils import contains_term, match_score
+from .schema_types import is_numeric, is_date, is_string, is_time_field, is_system_field, is_id_field
+from .biz_lexicon import match as lex_match, get as lex_get
 from ..database import SessionLocal
 from ..models import ColumnMeta, TableMeta
-
-_NUMERIC_TYPES = {"int", "integer", "bigint", "smallint", "tinyint", "decimal",
-                  "numeric", "float", "double", "number"}
-_DATE_TYPES = {"date", "datetime", "timestamp", "time", "year"}
-_STRING_TYPES = {"varchar", "char", "text", "longtext", "mediumtext", "tinytext",
-                 "string", "enum", "set"}
 
 
 class MappingError(Exception):
@@ -30,50 +27,10 @@ class PermissionMappingError(MappingError):
     pass
 
 
-def _col_type_normalized(t: str) -> str:
-    return (t or "").lower().split("(")[0].strip()
-
-
-def _is_numeric_type(t: str) -> bool:
-    return _col_type_normalized(t) in _NUMERIC_TYPES
-
-
-def _is_date_type(t: str) -> bool:
-    return _col_type_normalized(t) in _DATE_TYPES
-
-
-def _is_string_type(t: str) -> bool:
-    return _col_type_normalized(t) in _STRING_TYPES
-
-
-def _time_like(col: ColumnMeta) -> bool:
-    c = (col.comment or "") + " " + col.column_name
-    return _is_date_type(col.data_type) or any(
-        k in c.lower() for k in ("日期", "时间", "date", "time"))
-
-
 def _text_of(col: ColumnMeta) -> str:
     """字段的可匹配文本：注释 + 字段名。"""
     parts = [p for p in (col.comment or "", col.column_name) if p]
     return " ".join(parts).lower()
-
-
-def _contains_term(text: str, term: str) -> bool:
-    """中文注释子串 / 英文名子串 / 词包含判断。"""
-    if not term:
-        return False
-    t = text.lower()
-    term_l = term.lower()
-    if len(term_l) >= 2:
-        if term_l in t:
-            return True
-        # 中文 2-gram 部分命中（"销售额" 命中 "销售" 场景）
-        if re.search(r"[\u4e00-\u9fa5]", term_l) and re.search(r"[\u4e00-\u9fa5]", t):
-            for ln in (3, 2):
-                segs = {t[i:i + ln] for i in range(max(1, len(t) - ln + 1))}
-                if any(s and s in term_l for s in segs):
-                    return True
-    return False
 
 
 def fetch_schemas(datasource_id: int) -> list[str]:
@@ -116,21 +73,20 @@ def fetch_schema_candidates(datasource_id: int,
                     .order_by(ColumnMeta.ordinal).all())
             for c in cols:
                 cname = c.column_name.lower()
-                if cname in ("id", "is_deleted", "create_user", "update_user",
-                             "create_time", "update_time", "delete_time"):
+                if is_system_field(cname):
                     continue
                 # ID/外键类字段（xx_id 或 id 结尾）不参与指标/维度匹配：
                 # 防止规则引擎把 project_id 之类外键当 SUM 指标，或把 ID 当分组维度
-                if cname == "id" or cname.endswith("_id"):
+                if is_id_field(cname):
                     continue
                 item = {"table": t.table_name, "table_comment": t.comment or "",
                         "column": c.column_name, "comment": c.comment or "",
                         "data_type": c.data_type or ""}
-                if _time_like(c):
+                if is_time_field(c.column_name, c.comment, c.data_type):
                     times.append(item)
-                elif _is_numeric_type(c.data_type):
+                elif is_numeric(c.data_type):
                     metrics.append({**item, "agg": "sum"})
-                elif _is_string_type(c.data_type) or not _is_numeric_type(c.data_type):
+                elif is_string(c.data_type) or not is_numeric(c.data_type):
                     dims.append(item)
         return {"metrics": metrics, "dimensions": dims, "time_fields": times}
     finally:
@@ -155,41 +111,36 @@ def _match_dict_entry(dicts: list[dict], term: str) -> dict | None:
     return None
 
 
-def _pick_best(items: list[dict], term: str) -> dict | None:
-    """按注释/字段名包含度打分选最优。"""
-    if not items:
-        return None
-    best, best_score = None, -1
-    for it in items:
-        score = 0
-        text = (it["comment"] + " " + it["column"]).lower()
-        t = term.lower()
-        if t and (t in text or text in t):
-            score += 10
-        if t in it["comment"].lower():
-            score += 6
-        if t in it["column"].lower():
-            score += 4
-        # 中文短词部分命中降权（避免"销售"误配"销售渠道"）
-        if score > 0 and len(t) <= 2:
-            score -= 2
-        if score > best_score:
-            best_score, best = score, it
-    return best if best_score > 0 else None
-
-
 def _lookup_metric(db: Session, datasource_id: int, term: str, candidates: dict) -> dict | None:
     """指标→字段：词典优先，其次数值字段注释匹配。"""
     dicts = db  # 词典由上层通过 spec 传递；此处仅 Schema 匹配
-    items = [m for m in candidates["metrics"] if _contains_term(m["comment"], term)
-             or _contains_term(m["column"], term)]
-    return _pick_best(items, term)
+    items = [m for m in candidates["metrics"] if contains_term(m["comment"], term)
+             or contains_term(m["column"], term)]
+    best = None
+    best_s = -1
+    for it in items:
+        text = (it["comment"] + " " + it["column"]).lower()
+        s = match_score(text, term)
+        if s > best_s:
+            best_s, best = s, it
+    if best_s <= 0:
+        best = None
+    return best
 
 
 def _lookup_dimension(db: Session, datasource_id: int, term: str, candidates: dict) -> dict | None:
-    items = [d for d in candidates["dimensions"] if _contains_term(d["comment"], term)
-             or _contains_term(d["column"], term)]
-    return _pick_best(items, term)
+    items = [d for d in candidates["dimensions"] if contains_term(d["comment"], term)
+             or contains_term(d["column"], term)]
+    best = None
+    best_s = -1
+    for it in items:
+        text = (it["comment"] + " " + it["column"]).lower()
+        s = match_score(text, term)
+        if s > best_s:
+            best_s, best = s, it
+    if best_s <= 0:
+        best = None
+    return best
 
 
 def _lookup_time_field(candidates: dict) -> dict | None:
@@ -202,6 +153,14 @@ def _lookup_time_field(candidates: dict) -> dict | None:
         if "创建时间" in c or "create_time" in c or "下单时间" in c or "create" in c:
             return t
     return times[0]
+
+
+def _strip_bucket_suffix(term: str) -> str:
+    """分箱维度名去后缀：'文件大小范围'→'文件大小'（范围/区间/分布 是分箱语义词）。"""
+    for suf in lex_get("bucket"):
+        if term.endswith(suf) and len(term) > len(suf):
+            return term[:-len(suf)]
+    return term
 
 
 def map_spec_to_schema(spec: Any, datasource_id: int, user_id: int,
@@ -275,6 +234,7 @@ def map_spec_to_schema(spec: Any, datasource_id: int, user_id: int,
         mapped_dims = []
         for d in spec.dimensions:
             term = d.name or ""
+            bucket = getattr(d, "bucket", None)
             ent = _match_dict_entry(dim_dicts, term)
             col = None
             if ent and ent["target_table"] and ent["target_column"]:
@@ -284,12 +244,40 @@ def map_spec_to_schema(spec: Any, datasource_id: int, user_id: int,
                 col = _lookup_dimension(db, datasource_id, term, candidates)
             if col is None:
                 col = _lookup_dimension(db, datasource_id, d.alias or term, candidates)
+            # 分箱维度（范围分布）：数值字段（大小/金额/时长）在候选里属 metrics，
+            # 需从指标候选中回找，否则「文件大小范围」这类维度映射不到 size 字段
+            if col is None and bucket is not None:
+                for mt in (term, _strip_bucket_suffix(term), d.alias or ""):
+                    if not mt:
+                        continue
+                    col = _lookup_metric(db, datasource_id, mt, candidates)
+                    if col:
+                        break
             if col is None:
                 raise MappingError(f"未找到维度「{term}」对应的分组字段。可查维度："
                                    + "、".join(x["comment"] or x["column"]
                                                for x in candidates["dimensions"][:8]) or "（无）")
-            mapped_dims.append({"name": term, "column": col["column"],
-                                "table": col["table"], "comment": col["comment"] or col["column"]})
+            item = {"name": term, "column": col["column"],
+                    "table": col["table"], "comment": col["comment"] or col["column"]}
+            # 分箱维度（范围分布）：把 bucket 定义透传给 SQL 层（生成 CASE WHEN 直方图）
+            if bucket is not None and (bucket.ranges or bucket.labels):
+                b_field = (bucket.field or "").strip() or col["column"]
+                # bucket.field 显式指定且与映射列不同时，确认该字段在候选范围内存在
+                if (bucket.field or "").strip() and b_field != col["column"]:
+                    exists = any(c["column"] == b_field for c in
+                                 candidates["dimensions"] + candidates["metrics"])
+                    if exists:
+                        col = {"table": col["table"], "column": b_field,
+                               "comment": col["comment"]}
+                        item["column"] = b_field
+                item["bucket"] = {
+                    "field": b_field,
+                    "ranges": [[float(x), float(y)] for x, y in (bucket.ranges or [])],
+                    "labels": list(bucket.labels or []),
+                    "unit": bucket.unit or "",
+                    "left_closed": bool(bucket.left_closed),
+                }
+            mapped_dims.append(item)
 
         # 回填 COUNT(*) 类指标的归属表：维度表优先，其次 schema 候选首表
         for mm in mapped_metrics:
@@ -309,7 +297,7 @@ def map_spec_to_schema(spec: Any, datasource_id: int, user_id: int,
             if col is None:
                 # 条件字段匹配：优先字符串维度，其次任意字段
                 for cand in candidates["dimensions"] + candidates["metrics"]:
-                    if _contains_term(cand["comment"], term) or _contains_term(cand["column"], term):
+                    if contains_term(cand["comment"], term) or contains_term(cand["column"], term):
                         col = cand
                         break
             if col is None:

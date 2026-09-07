@@ -14,16 +14,14 @@ import re
 from ..database import SessionLocal
 from ..llm import LLMClient, LLMError, parse_json_content
 from ..models import ColumnMeta, Datasource, Relationship, SqlExample, TableMeta
+from .text_utils import tokenize  # L-0 公共化：统一分词
+from .schema_types import SYSTEM_TABLES, is_id_field, is_system_field  # L-0 公共化：类型/系统字段
+from .biz_lexicon import match as lex_match  # L-0 公共化：业务词表
+from . import prompt_kit  # L-0 公共化：prompt 拼装
+from .llm_json import extract_json as llm_extract_json  # L-0 公共化：LLM JSON 解析
 
-# AI_Infra 系统表黑名单：业务数据源元数据中不应出现，LLM 检索候选表时强制排除
-SYSTEM_TABLE_BLACKLIST = frozenset({
-    "column_meta", "table_meta", "datasource", "permission_rule", "users", "user", "role",
-    "conversation", "conversation_message", "query_log", "saved_query",
-    "faq_pair", "knowledge_doc", "sql_example", "relationship", "user_group",
-    "workspace", "audit_log", "model_config", "menu", "user_group_role",
-    "doc_chunk", "document_chunk", "kb_doc", "knowledge_chunk",
-    "scheduled_task", "task_run_log", "sys_celery_task_log", "sys_crontab",
-})
+# 向后兼容：旧引用 SYSTEM_TABLE_BLACKLIST 的模块
+SYSTEM_TABLE_BLACKLIST = SYSTEM_TABLES
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +103,7 @@ LIMIT 分页参数;
 
 ## 六、系统硬性约束
 1. 仅允许 SELECT 查询，禁止 INSERT/UPDATE/DELETE/DDL/多语句、禁止注释注入
-2. 只能使用【可用表与字段】中列出的表与字段；字段类型与注释见 Schema
+2. 只能使用【可用表与字段】中列出的表与字段；**WHERE / GROUP BY / HAVING / ORDER BY 引用的每一个字段，都必须能在【可用表与字段】的对应表名下找到**；Schema 中不存在的字段一律禁止使用（例如某表没有 is_deleted 软删字段时，禁止写 `is_deleted = 0`，也不得想当然补充）；字段类型与注释见 Schema
 3. 涉及时间时使用数据库当前日期函数（如 CURDATE()/now()），不得使用固定日期
 4. 【相似示例】与【知识库参考】仅作口径参考，不得虚构不存在的表字段
 5. 若生成 SQL 涉及被权限限制的字段，忽略之（权限由系统自动注入）
@@ -129,9 +127,11 @@ LIMIT 分页参数;
 
 
 def _schema_text(datasource_id: int, top_tables: list[TableMeta] | None = None,
-                 schema_name: str | None = None) -> str:
+                 schema_name: str | None = None,
+                 preferred: set[str] | None = None) -> str:
     """Step3+4：按选中表 ID 一条 IN 查询 column_meta，关联回原表，按用户口径格式化：
-    `表名: 列(类型·注释), 列(类型·注释)`（每表一行，全量字段不裁剪，按 ordinal 排序）。"""
+    `表名: 列(类型·注释), 列(类型·注释)`（每表一行，全量字段不裁剪，按 ordinal 排序）。
+    preferred 字段（spec 已映射/检索命中的目标字段）加 ★ 前缀，帮助 LLM 聚焦。"""
     db = SessionLocal()
     try:
         if top_tables:
@@ -153,6 +153,7 @@ def _schema_text(datasource_id: int, top_tables: list[TableMeta] | None = None,
         cols_by_table: dict[int, list[ColumnMeta]] = {}
         for c in all_cols:
             cols_by_table.setdefault(c.table_meta_id, []).append(c)
+        preferred = preferred or set()
         lines = []
         for t in tables:  # Step4：关联回原表，按用户锁定格式输出
             parts = []
@@ -161,6 +162,8 @@ def _schema_text(datasource_id: int, top_tables: list[TableMeta] | None = None,
                 type_or_comment = "·".join(x for x in (c.data_type, c.comment) if x)
                 if type_or_comment:
                     seg += f"({type_or_comment})"
+                if c.column_name in preferred:
+                    seg = f"★{seg}"  # spec 已映射/检索命中的目标字段，优先使用
                 parts.append(seg)
             lines.append(f"{t.table_name}: {', '.join(parts)}")
         return "\n".join(lines)
@@ -207,83 +210,9 @@ def _join_paths_text(datasource_id: int,
         db.close()
 
 
-def _biz_semantics_text(datasource_id: int) -> str:
-    """关键业务关联语义（软引用等无外键约束的关联）。精简、放在 user_prompt 前部，LLM 才可能遵守。"""
-    db = SessionLocal()
-    try:
-        tabs = {t.table_name for t in db.query(TableMeta)
-                .filter(TableMeta.datasource_id == datasource_id).all()}
-        lines = []
-        if {"api_executions", "api_test_cases", "api_definitions"} <= tabs:
-            lines.append("· 接口调用/执行记录：api_executions.ref_id 引用执行对象ID（execution_type=case 时对应 "
-                         "api_test_cases.id，scenario 时对应 api_scenarios.id）。统计“接口/用例的调用次数”时，"
-                         "正确链路：api_executions JOIN api_test_cases ON api_executions.ref_id = api_test_cases.id "
-                         "JOIN api_definitions ON api_test_cases.api_id = api_definitions.id，"
-                         "再按 api_definitions.name 分组 COUNT(api_executions.id)。")
-        if {"api_test_cases", "api_definitions"} <= tabs:
-            lines.append("· api_test_cases.api_id 关联所属接口定义 api_definitions.id（用例→接口）。")
-            lines.append("· 按项目过滤（如 RT/RT项目）：用 api_definitions.project_id IN (SELECT id FROM test_projects "
-                         "WHERE name LIKE '%RT%') 或 api_test_cases.project_id IN (...)，项目名匹配必须用 LIKE '%RT%'（模糊），"
-                         "禁止用 name = 'RT' 精确匹配（会漏掉 RT项目 等名称）。")
-        if lines:
-            return "【关键业务关联语义（软引用，必须遵循）】\n" + "\n".join(lines)
-        return ""
-    finally:
-        db.close()
-
-
-def _augment_bridge_tables(datasource_id: int, schema_name: str | None,
-                           tables: list[TableMeta], question: str = "") -> list[TableMeta]:
-    """V1.1 Step5 补充：业务软引用提示中点名的桥接表（无外键 relationship，LLM 选表易漏），
-    确定性补入选中表，保证 Step4 字段上下文完整、Step7 可正确 JOIN。
-    【场景闸门】只有问题命中场景关键词时才补该场景的桥接表，避免无关问题（如 agent 任务）
-    被无脑补入 api 链路表造成上下文污染或误触发相近表澄清。"""
-    biz = _biz_semantics_text(datasource_id)
-    if not biz:
-        return tables
-    # 场景 → (触发关键词, 需补的桥接表)
-    scenarios = [
-        (("调用次数", "被调用", "执行次数", "访问次数", "请求次数", "调用了多少次", "执行了多少次"),
-         {"api_executions", "api_test_cases", "api_definitions", "api_scenarios"}),
-        (("接口测试用例", "接口用例", "接口的用例"),
-         {"api_test_cases", "api_definitions"}),
-    ]
-    need: set[str] = set()
-    for kws, tnames in scenarios:
-        if any(k in (question or "") for k in kws):
-            need |= tnames
-    if not need:
-        return tables
-    db = SessionLocal()
-    try:
-        all_t = _all_business_tables(db, datasource_id, schema_name)
-    finally:
-        db.close()
-    have = {t.table_name for t in tables}
-    out = list(tables)
-    for t in all_t:
-        if t.table_name in need and t.table_name not in have and re.search(
-                rf"(?<![A-Za-z0-9_]){re.escape(t.table_name)}(?![A-Za-z0-9_])", biz):
-            out.append(t)
-            have.add(t.table_name)
-    if len(out) != len(tables):
-        logger.info("[NL2SQL] 业务语义补表: %s → %s",
-                    [t.table_name for t in tables], [t.table_name for t in out])
-    return out
-
-
 def _tokenize_cn(question: str) -> set[str]:
-    """轻量中文分词：CJK 连续串生成 2/3/4 元组 + 拉丁/数字/下划线原词。
-    解决整句当词导致「接口/任务/渠道」等关键词无法命中表注释的问题。"""
-    q = question.lower()
-    tokens: set[str] = set()
-    for run in re.findall(r"[\u4e00-\u9fa5]+", q):
-        L = len(run)
-        for n in (2, 3, 4):
-            for i in range(L - n + 1):
-                tokens.add(run[i:i + n])
-    tokens.update(re.findall(r"[a-z0-9_]+", q))
-    return {t for t in tokens if len(t) >= 2}
+    """Backward-compatible: delegates to text_utils.tokenize (L-0 public module)."""
+    return tokenize(question)
 
 
 def retrieve_candidate_tables(datasource_id: int, question: str, top_k: int = 12,
@@ -341,7 +270,7 @@ class TableSelectError(Exception):
 # 选表 LLM 的 system prompt（V1.1：全表清单 + 选表规则拼进 system prompt）
 SELECT_TABLE_SYSTEM = """你是严格的数据库表选择器。任务：根据用户的数据查询问题，从【数据表清单】中选出本次查询需要的全部数据表。
 规则：
-1. 依据表名与表中文注释，判断其与问题中的实体/指标/维度/筛选条件的相关性；
+1. 依据表名、表中文注释，以及【用户查询目标】/【文件大小类字段命中】块判断相关性：命中用户目标字段的表优先（如 size 文件大小 + upload_status 上传状态）；表注释为空时以字段命中为准，禁止仅凭表名猜测；
 2. 需要关联查询时，主表与关联链路涉及的表都必须选出（如按项目名称过滤→选出项目表；统计接口调用次数→选出执行记录表及其关联对象表）；
 3. 只选必需的表，无关表一律不选；确实无任何相关表时输出空数组 []；
 4. 必须结合【历史对话】理解省略式/指代式追问（如“环比去年呢”“那每个接口呢”），沿用上一轮已确认的表；
@@ -357,6 +286,20 @@ def _all_business_tables(db, datasource_id: int, schema_name: str | None):
     if schema_name:
         q = q.filter(TableMeta.schema_name == schema_name)
     return q.order_by(TableMeta.table_name).all()
+
+
+def _hint_matches(blob: str, hint: str) -> bool:
+    """拆表检索词匹配（参考实现 LIKE %kw%）：子串命中即视为匹配。"""
+    return bool(hint) and hint.lower() in blob
+
+
+def _hint_hit_index(table_name: str, comment: str, hints: list[str]) -> int:
+    """返回首个命中检索词的索引（未命中返回 99），供候选排序。"""
+    blob = f"{table_name} {comment or ''}".lower()
+    for i, h in enumerate(hints):
+        if h and _hint_matches(blob, h):
+            return i
+    return 99
 
 
 def _parse_confirmed_tables(question: str, history: list[dict] | None) -> list[str]:
@@ -412,25 +355,119 @@ def _parse_select_blob(content: str) -> list[dict]:
     return out
 
 
+_MEASURE_KW = None  # 占位移除标记（检索权重已参考实现简化，不再用规则加权）
+
+
+def _search_tables(db, datasource_id: int, schema_name: str | None,
+                   table_hints: list[str]) -> tuple[list[TableMeta], dict[int, list[tuple[str, str]]]]:
+    """四维度表检索（参考 UnifiedQA _fetch_matching_tables）：
+    对每个检索词按「表名 / 表注释 / 字段注释」三维度 LIKE 匹配（本系统无 usage_guide
+    使用说明表与 table_desc 表描述字段，表描述并入表注释维度），UNION 去重，
+    排序：字段注释命中的表（用户要查的量直接落在字段上，如 file_size 文件大小（字节））
+    → BASE 表优先 → 表名。
+    返回 (候选表列表, 字段命中证据 {table_id: [(column, comment), ...]})。"""
+    if not table_hints:
+        return [], {}
+    all_tables = _all_business_tables(db, datasource_id, schema_name)
+    if not all_tables:
+        return [], {}
+    by_id = {t.id: t for t in all_tables}
+    table_ids = [t.id for t in all_tables]
+    cols = (db.query(ColumnMeta)
+            .filter(ColumnMeta.table_meta_id.in_(table_ids))
+            .order_by(ColumnMeta.ordinal).all())
+    col_by_table: dict[int, list[ColumnMeta]] = {}
+    for c in cols:
+        col_by_table.setdefault(c.table_meta_id, []).append(c)
+
+    # Step1：四维度 LIKE 匹配（表名/表注释/字段注释），按表去重（参考实现 UNION + seen 去重）
+    hit_ids: set[int] = set()
+    column_hit_ids: set[int] = set()  # 字段注释维度命中的表（最直接的表信号）
+    evidence: dict[int, list[tuple[str, str]]] = {}
+    name_hit_ids: set[int] = set()  # 表名/表注释维度命中（权重最高）
+    for h in table_hints:
+        if not h:
+            continue
+        hl = h.lower()
+        for t in all_tables:
+            if t.id in hit_ids:
+                continue
+            tname = (t.table_name or "").lower()
+            if hl and hl in tname:
+                hit_ids.add(t.id)
+                name_hit_ids.add(t.id)
+                continue
+            blob = f"{t.table_name} {t.comment or ''}".lower()
+            if hl and hl in blob:
+                hit_ids.add(t.id)
+                name_hit_ids.add(t.id)
+        # 字段注释维度（参考实现维度4）：独立收集命中与证据，不受表名/注释先命中影响；
+        # 用户确认：字段命中权重低于表名/注释命中——排序靠后，但表不丢（保留在候选池）
+        for c in cols:
+            cblob = f"{c.column_name} {c.comment or ''}".lower()
+            if hl and hl in cblob:
+                hit_ids.add(c.table_meta_id)
+                column_hit_ids.add(c.table_meta_id)
+                evidence.setdefault(c.table_meta_id, []).append((c.column_name, c.comment or ""))
+
+    # Step2：排序——表名/表注释命中（权重最高，用户确认）→ BASE 表优先 → 表名；
+    # 字段命中表不丢（保留在候选池），由选表阶段【优先候选区】按量词字段再呈现
+    def _sort_key(tid: int) -> tuple:
+        t = by_id[tid]
+        return (0 if tid in name_hit_ids else 1,
+                0 if (t.table_type or "").upper().startswith("BASE") else 1,
+                (t.table_name or "").lower())
+
+    hits = [by_id[tid] for tid in sorted(hit_ids, key=_sort_key)]
+    return hits, evidence
+
+
+def _table_hint_hits(db, datasource_id: int, schema_name: str | None,
+                     table_hints: list[str]) -> list[TableMeta]:
+    """四维检索的表候选（兼容旧调用）。"""
+    hits, _ = _search_tables(db, datasource_id, schema_name, table_hints)
+    return hits
+
+
 def _llm_select_tables(datasource_id: int, question: str,
                        schema_name: str | None = None,
                        llm: LLMClient | None = None,
-                       history: list[dict] | None = None
+                       history: list[dict] | None = None,
+                       table_hints: list[str] | None = None,
+                       target_fields: list[str] | None = None
                        ) -> tuple[list[TableMeta], dict]:
-    """V1.1 两阶段选表（Step2）。
-    1) 全量业务表（无 LIMIT）清单（id+表名+注释）拼入 system prompt；
+    """V1.2 两阶段选表（Step2）。
+    1) 全量业务表（无 LIMIT）清单（id+表名+注释）拼入 user prompt；
     2) 多轮澄清已确认表（「已确认查询表：X、Y」）→ 直接锁定，不再 LLM 选表；
-    3) LLM 输出 [{id,table_name,comment}]，按 id/表名匹配，全量采纳不截断；
-    4) LLM 未配置→返回空（上层走 mock）；解析失败重试 1 次，仍失败抛 TableSelectError（不回退关键词、不猜表）。
+    3) 问题拆表检索词（table_hints，问题重构提取）预筛全量表：
+       - 命中 ≤30 张 → **确定性直接采用命中表（跳过 LLM）**，不再全表澄清；
+       - 命中 >30 张 → 选表清单收窄为命中表（前 60 张），LLM 只需从中挑选；
+       - 无命中 → 维持全量清单；
+    4) LLM 输出 [{id,table_name,comment}]，按 id/表名匹配，全量采纳不截断；
+    5) LLM 未配置→返回空（上层走 mock）；解析失败重试 1 次，仍失败抛 TableSelectError。
     返回 (选中表列表, 选表元信息 {source, raw, total})。"""
     db = SessionLocal()
     try:
         all_tables = _all_business_tables(db, datasource_id, schema_name)
+        hint_hits, hint_evidence = _search_tables(
+            db, datasource_id, schema_name, table_hints or [])
     finally:
         db.close()
-    meta = {"source": "none", "raw": [], "total": len(all_tables)}
+    meta = {"source": "none", "raw": [], "total": len(all_tables),
+            "hint_hits": [t.table_name for t in hint_hits],
+            "hint_evidence": {str(tid): cols for tid, cols in hint_evidence.items()}}
     if not all_tables:
         return [], meta
+    if hint_hits:
+        logger.info("[问数][选表] 四维检索词 %s 命中 %d 张（收窄选表范围）: %s",
+                    table_hints, len(hint_hits),
+                    [t.table_name for t in hint_hits][:15])
+    if hint_evidence:
+        by_id = {t.id: t for t in all_tables}
+        _ev = {by_id[tid].table_name: [c for c, _ in cols[:3]]
+               for tid, cols in hint_evidence.items() if tid in by_id}
+        logger.info("[问数][选表] 字段注释命中 %d 张（字段证据，供生成阶段引用）: %s",
+                    len(_ev), _ev)
 
     by_name = {t.table_name: t for t in all_tables}
 
@@ -448,18 +485,69 @@ def _llm_select_tables(datasource_id: int, question: str,
     if llm is None or not getattr(llm, "configured", False):
         return [], meta  # 无 LLM：上层走 mock 演示模式
 
-    # 2) 全表清单（含 id），无 LIMIT
+    # 2) 选表清单：拆表命中 >30 张 → 收窄为命中表（前 120 张，字段命中表已在排序最前），
+    #    无命中 → 全量。参考实现无收窄（全量给 LLM），此处 120 张为 prompt 大小平衡。
+    if hint_hits:
+        select_pool = hint_hits[:120]
+        pool_label = f"（拆表检索词命中 {len(hint_hits)} 张，已收窄为前 {len(select_pool)} 张）"
+    else:
+        select_pool = all_tables
+        pool_label = ""
     catalog = "\n".join(
         f'- {{"id": {t.id}, "table_name": "{t.table_name}", "comment": "{(t.comment or "").replace(chr(34), " ")}"}}'
-        for t in all_tables)
+        for t in select_pool)
+    # 字段命中证据注入选表 prompt（参考系统把检索文档含字段信息直接给 LLM）：
+    # 命中「大小/上传/附件类量词字段」的表单独成【优先候选】区（用户要查的量的载体或
+    # 业务状态锚点，如 size 文件大小 / upload_status 上传状态），无注释的表
+    # （如 attachment_preview_record）靠这些字段让 LLM 识别业务含义
+    _ev_lines = []
+    _strong_ids: set[int] = set()
+    if hint_evidence:
+        _by_id = {t.id: t for t in select_pool}
+        _size_cols = ("大小", "字节", "size", "长度", "体积", "上传", "附件")
+        for tid, cols in hint_evidence.items():
+            if tid not in _by_id:
+                continue
+            strong = [(c, cm) for c, cm in cols
+                      if any(k in (cm or "").lower() or k in c.lower() for k in _size_cols)]
+            if not strong:
+                continue
+            _strong_ids.add(tid)
+            _ev_lines.append(
+                f"- {_by_id[tid].table_name}: " + "、".join(
+                    f"{c}（{cm or '无注释'}）" for c, cm in strong[:4]))
+    evidence_block = (
+        "\n【文件大小类字段命中（用户要查的量在这些表的字段上，优先考虑）】\n"
+        + "\n".join(_ev_lines)
+        if _ev_lines else "")
+    # 用户查询目标（spec 解析出的指标/维度名，如"文件大小"）→ 选表时的字段维度提示
+    target_block = ""
+    if target_fields:
+        target_block = (
+            "\n【用户查询目标（请优先选包含这些目标字段的表）】"
+            + "、".join(target_fields[:8]) + "\n")
+    # 优先候选区：命中用户量词/状态锚点字段的表置顶并标注，其余候选跟在后面（信息分层，
+    # 减少 LLM 在 100+ 张清单中决策的不稳定性）
+    _strong = [t for t in select_pool if t.id in _strong_ids]
+    _rest = [t for t in select_pool if t.id not in _strong_ids]
+    if _strong:
+        catalog = (
+            "【优先候选表（字段命中用户量词/状态锚点，最可能相关）】\n"
+            + "\n".join(
+                f'- {{"id": {t.id}, "table_name": "{t.table_name}", "comment": "{(t.comment or "").replace(chr(34), " ")}"}}'
+                for t in _strong)
+            + "\n【其他候选表】\n"
+            + "\n".join(
+                f'- {{"id": {t.id}, "table_name": "{t.table_name}", "comment": "{(t.comment or "").replace(chr(34), " ")}"}}'
+                for t in _rest))
     hist_lines = []
     for m in (history or [])[-4:]:
         role_label = "用户" if m.get("role") == "user" else "助手"
         hist_lines.append(f"{role_label}: {m.get('text', '')}")
     history_block = "\n".join(hist_lines) or "（无）"
     user_prompt = (
-        f"【数据表清单（schema: {schema_name or '全部'}，共 {len(all_tables)} 张，全量无截断）】\n"
-        f"{catalog}\n\n"
+        f"【数据表清单（schema: {schema_name or '全部'}，共 {len(select_pool)} 张{pool_label}）】\n"
+        f"{catalog}\n{target_block}\n{evidence_block}\n\n"
         f"【历史对话】\n{history_block}\n\n"
         f"【用户问题】{question}\n\n"
         "只输出 JSON 数组：[{\"id\":表ID,\"table_name\":\"表名\",\"comment\":\"表注释\"}, ...]，无其他文字。")
@@ -480,7 +568,7 @@ def _llm_select_tables(datasource_id: int, question: str,
             for it in items:
                 t = None
                 if it["id"] is not None:
-                    t = next((x for x in all_tables if x.id == it["id"]), None)
+                    t = next((x for x in select_pool if x.id == it["id"]), None)
                 if t is None:
                     t = by_name.get(it["table_name"])
                 if t and t.id not in seen:
@@ -491,7 +579,8 @@ def _llm_select_tables(datasource_id: int, question: str,
             break
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
-            logger.info("[NL2SQL] 选表第 %d 次失败: %s", attempt + 1, exc)
+            logger.info("[NL2SQL] 选表第 %d 次失败: %s | LLM原文: %r",
+                        attempt + 1, exc, (content if "content" in dir() else "")[:200])
     if not picked:
         raise TableSelectError(f"无法识别本次查询相关的数据表（{last_exc}），请补充说明要查询的业务对象")
     if len(picked) > 20:
@@ -805,14 +894,43 @@ def generate_sql(datasource_id: int, workspace_id: int, question: str,
         if not ds:
             raise LLMError("数据源不存在")
         dialect = ds.type
+        _hints = ((spec_context or {}).get("spec") or {}).get("table_hints") or []
+        _spec_d = (spec_context or {}).get("spec") or {}
+        _target = []
+        for _m in (_spec_d.get("metrics") or []) + (_spec_d.get("dimensions") or []):
+            _n = _m.get("name")
+            if _n and _n not in _target:
+                _target.append(_n)
         try:
             tables, select_meta = _llm_select_tables(
-                datasource_id, question, llm=llm, history=history)
+                datasource_id, question, llm=llm, history=history,
+                table_hints=_hints, target_fields=_target)
         except TableSelectError as exc:
-            return {"intent": "clarify", "sql": "", "explain": str(exc),
-                    "tables": [], "candidates": [], "original_question": question}
-        # 业务软引用桥接表补全（无外键关系的链路表，LLM 易漏选）
-        tables = _augment_bridge_tables(datasource_id, None, tables, question)
+            # 回退为表级澄清：候选优先 = 拆表检索词命中表（收窄），无命中才全表
+            logger.warning("[问数][选表] LLM 选表失败(同步)，回退表候选澄清: %s", exc)
+            cand = []
+            try:
+                db2 = SessionLocal()
+                try:
+                    hits = _table_hint_hits(db2, datasource_id, None, _hints)
+                    if hits:
+                        cand = [{"table": t.table_name, "comment": t.comment or ""}
+                                for t in hits[:60]]
+                    else:
+                        all_t = _all_business_tables(db2, datasource_id, None)
+                        cand = [{"table": t.table_name, "comment": t.comment or ""}
+                                for t in all_t]
+                finally:
+                    db2.close()
+            except Exception as e2:  # noqa: BLE001
+                logger.warning("[问数][选表] 读取全表候选失败: %s", e2)
+            if cand and _hints:
+                cand.sort(key=lambda c: _hint_hit_index(c["table"], c.get("comment") or "", _hints))
+            return {"intent": "clarify", "sql": "",
+                "explain": f"未能自动识别与问题相关的数据表（{exc}）。请在下方勾选需要查询的表（可多选，将分别查询）：",
+                "tables": [c["table"] for c in cand],
+                "candidates": cand, "original_question": question,
+                "table_hints": _hints}
         select_meta["raw"] = [{"id": t.id, "table_name": t.table_name, "comment": t.comment or ""}
                               for t in tables]
         # 歧义检测（V1.1：基于 LLM 选中表，相近表≥2 且问题无明确限定词 → 先澄清）
@@ -826,9 +944,45 @@ def generate_sql(datasource_id: int, workspace_id: int, question: str,
                     "tables": [c["table"] for c in clarify],
                     "candidates": clarify,
                     "original_question": question}
-        schema = (_schema_text(datasource_id, tables)
+        # spec 已映射字段（mapping）与检索命中字段（hint_evidence）→ 优先推荐 + schema 分层
+        _preferred: set[str] = set()
+        _recommend_lines: list[str] = []
+        _mapping = (spec_context or {}).get("mapping") or {}
+        for _m in (_mapping.get("metrics") or []) + (_mapping.get("dimensions") or []):
+            col = _m.get("column") or ""
+            cmt = _m.get("comment") or ""
+            if col:
+                _preferred.add(col)
+                _recommend_lines.append(
+                    f"- {_m.get('name') or col} → {col}（{cmt or '无注释'}）")
+        if _recommend_lines:
+            logger.info("[问数][选表] spec 映射字段注入优先推荐: %s",
+                        [l.split(' → ')[0] for l in _recommend_lines])
+        # 检索命中字段证据（四维检索：字段注释命中）
+        _evidence = select_meta.get("hint_evidence") or {}
+        _by_tid = {t.id: t.table_name for t in tables}
+        _evidence_lines: list[str] = []
+        if _evidence:
+            for _tid, _cols in _evidence.items():
+                if _tid not in _by_tid:
+                    continue
+                for _c, _cm in _cols:
+                    if _c:
+                        _preferred.add(_c)
+                _evidence_lines.append(
+                    f"- {_by_tid[_tid]}: " + "、".join(
+                        f"{c}（{cm or '无注释'}）" for c, cm in _cols[:4]))
+        schema = (_schema_text(datasource_id, tables, preferred=_preferred)
                   if tables else "（未匹配到相关数据表，说明当前问题不属于数据查询范畴）")
         joins = _join_paths_text(datasource_id, tables)
+        evidence_section = (
+            "\n【检索证据（拆表词/字段注释命中依据，供参考选表理由）】\n"
+            + "\n".join(_evidence_lines)
+            if _evidence_lines else "")
+        recommend_section = (
+            "\n【优先推荐字段（用户问题解析出的目标字段，★字段建议优先使用，可结合语义微调）】\n"
+            + "\n".join(_recommend_lines)
+            if _recommend_lines else "")
         # 用户已确认表（多轮澄清点选）：强制大模型综合考虑所有确认表，不得遗漏
         confirmed_section = ""
         if select_meta.get("source") == "confirmed" and len(tables) >= 2:
@@ -869,7 +1023,6 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
 【场景三：UNION ALL】
 仅在各 SELECT 列数、列类型完全一致时使用，外层只引用第一个 SELECT 的列别名；列数不一致时禁止使用（会报 1222 错误）。
 """
-        biz_semantics = _biz_semantics_text(datasource_id)
         examples = retrieve_few_shots(workspace_id, question)
         example_text = "\n".join(
             f"问题：{e['question']}\nSQL：{e['sql']}" for e in examples) or "（暂无示例）"
@@ -906,10 +1059,10 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
     user_prompt = f"""【历史对话】
 {history_text or "（无）"}
 {confirmed_section}
-【可用表与字段（格式：表名: 字段(类型·注释)，已按选中表过滤）】
+【可用表与字段（格式：表名: 字段(类型·注释)，★=优先推荐字段，已按选中表过滤）】
 {schema}
-
-{biz_semantics}
+{recommend_section}
+{evidence_section}
 
 【JOIN 路径】
 {joins}
@@ -1072,17 +1225,54 @@ def generate_sql_stream(datasource_id: int, workspace_id: int, question: str,
         # schema 限定：显式参数 > spec 上下文
         if not schema_name and spec_context:
             schema_name = (spec_context.get("spec") or {}).get("schema") or None
+        # 拆表检索词：问题重构提取（table_hints），用于选表阶段表名/表注释预筛
+        _hints = ((spec_context or {}).get("spec") or {}).get("table_hints") or []
+        _spec_d = (spec_context or {}).get("spec") or {}
+        _target = []
+        for _m in (_spec_d.get("metrics") or []) + (_spec_d.get("dimensions") or []):
+            _n = _m.get("name")
+            if _n and _n not in _target:
+                _target.append(_n)
         try:
             tables, select_meta = _llm_select_tables(
                 datasource_id, question, schema_name=schema_name,
-                llm=llm, history=history)
+                llm=llm, history=history, table_hints=_hints,
+                target_fields=_target)
         except TableSelectError as exc:
+            # 回退为表级澄清：候选优先 = 拆表检索词命中表（收窄），无命中才全表
+            logger.warning("[问数][选表] LLM 选表失败，回退表候选澄清: %s", exc)
+            cand = []
+            try:
+                db2 = SessionLocal()
+                try:
+                    hits = _table_hint_hits(db2, datasource_id, schema_name, _hints)
+                    if hits:
+                        cand = [{"table": t.table_name, "comment": t.comment or ""}
+                                for t in hits[:60]]
+                    else:
+                        all_t = _all_business_tables(db2, datasource_id, schema_name)
+                        cand = [{"table": t.table_name, "comment": t.comment or ""}
+                                for t in all_t]
+                finally:
+                    db2.close()
+            except Exception as e2:  # noqa: BLE001
+                logger.warning("[问数][选表] 读取全表候选失败: %s", e2)
+            # 拆表检索词命中的表置顶，用户一眼可见最相关候选
+            if cand and _hints:
+                cand.sort(key=lambda c: _hint_hit_index(c["table"], c.get("comment") or "", _hints))
+                _top = [c["table"] for c in cand[:5]
+                        if _hint_hit_index(c["table"], c.get("comment") or "", _hints) < 99]
+                if _top:
+                    logger.info("[问数][选表] 拆表检索词命中候选置顶: %s", _top)
+            logger.info("[问数][选表] 表澄清候选 %d 张: %s", len(cand),
+                        [c["table"] for c in cand][:20])
             yield {"type": "result", "result": {
-                "intent": "clarify", "sql": "", "explain": str(exc),
-                "tables": [], "candidates": [], "original_question": question}}
+                "intent": "clarify", "sql": "",
+                "explain": f"未能自动识别与问题相关的数据表（{exc}）。请在下方勾选需要查询的表（可多选，将分别查询）：",
+                "tables": [c["table"] for c in cand],
+                "candidates": cand, "original_question": question,
+                "table_hints": _hints}}
             return
-        # 业务软引用桥接表补全（无外键关系的链路表，LLM 易漏选）
-        tables = _augment_bridge_tables(datasource_id, schema_name, tables, question)
         select_meta["raw"] = [{"id": t.id, "table_name": t.table_name, "comment": t.comment or ""}
                               for t in tables]
         # V1.1：相近表≥2 且问题无明确限定词 → 先澄清（主链路同样拦截，不再被 spec_context 跳过）
@@ -1097,9 +1287,40 @@ def generate_sql_stream(datasource_id: int, workspace_id: int, question: str,
                 "tables": [c["table"] for c in clarify],
                 "candidates": clarify, "original_question": question}}
             return
-        schema = (_schema_text(datasource_id, tables, schema_name)
+        # spec 已映射字段（mapping）与检索命中字段（hint_evidence）→ 优先推荐 + schema 分层
+        _preferred: set[str] = set()
+        _recommend_lines: list[str] = []
+        _mapping = (spec_context or {}).get("mapping") or {}
+        for _m in (_mapping.get("metrics") or []) + (_mapping.get("dimensions") or []):
+            col = _m.get("column") or ""
+            if col:
+                _preferred.add(col)
+                _recommend_lines.append(
+                    f"- {_m.get('name') or col} → {col}（{_m.get('comment') or '无注释'}）")
+        _evidence = select_meta.get("hint_evidence") or {}
+        _by_tid = {t.id: t.table_name for t in tables}
+        _evidence_lines: list[str] = []
+        if _evidence:
+            for _tid, _cols in _evidence.items():
+                if _tid not in _by_tid:
+                    continue
+                for _c, _cm in _cols:
+                    if _c:
+                        _preferred.add(_c)
+                _evidence_lines.append(
+                    f"- {_by_tid[_tid]}: " + "、".join(
+                        f"{c}（{cm or '无注释'}）" for c, cm in _cols[:4]))
+        schema = (_schema_text(datasource_id, tables, schema_name, preferred=_preferred)
                   if tables else "（未匹配到相关数据表，说明当前问题不属于数据查询范畴）")
         joins = _join_paths_text(datasource_id, tables)
+        evidence_section = (
+            "\n【检索证据（拆表词/字段注释命中依据，供参考选表理由）】\n"
+            + "\n".join(_evidence_lines)
+            if _evidence_lines else "")
+        recommend_section = (
+            "\n【优先推荐字段（用户问题解析出的目标字段，★字段建议优先使用，可结合语义微调）】\n"
+            + "\n".join(_recommend_lines)
+            if _recommend_lines else "")
         # 用户已确认表（多轮澄清点选）：强制大模型综合考虑所有确认表，不得遗漏
         confirmed_section = ""
         if select_meta.get("source") == "confirmed" and len(tables) >= 2:
@@ -1140,7 +1361,6 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
 【场景三：UNION ALL】
 仅在各 SELECT 列数、列类型完全一致时使用，外层只引用第一个 SELECT 的列别名；列数不一致时禁止使用（会报 1222 错误）。
 """
-        biz_semantics = _biz_semantics_text(datasource_id)
         examples = retrieve_few_shots(workspace_id, question)
         example_text = "\n".join(
             f"问题：{e['question']}\nSQL：{e['sql']}" for e in examples) or "（暂无示例）"
@@ -1180,6 +1400,21 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
             + _json.dumps(spec_data, ensure_ascii=False)
             + "\n【字段映射结果（只能使用这些表和字段）】\n"
             + _json.dumps(spec_context.get("mapping", {}), ensure_ascii=False))
+        # 分箱维度（范围分布，如"文件大小范围"）：必须生成 CASE WHEN 直方图 SQL
+        _buckets = [d for d in (spec_context.get("mapping") or {}).get("dimensions", [])
+                    if d.get("bucket")]
+        if _buckets:
+            _buckets_json = _json.dumps([{
+                "维度": d.get("name"), "分箱字段": d["bucket"].get("field"),
+                "区间": d["bucket"].get("ranges"), "标签": d["bucket"].get("labels"),
+                "单位": d["bucket"].get("unit", ""),
+            } for d in _buckets], ensure_ascii=False)
+            spec_section += (
+                f"\n【分箱维度（范围分布，必须严格按此生成，禁止改写边界）】\n{_buckets_json}\n"
+                "- 对每个分箱维度生成 `CASE WHEN 分箱字段 >= 下界 AND 分箱字段 < 上界 THEN '区间标签' ... ELSE '其他' END` 作为 SELECT 列，AS 中文维度名；\n"
+                "- 最后一个区间若标签语义为「以上/超过」，用 `分箱字段 >= 下界`（无上界）；\n"
+                "- 分组使用 `GROUP BY` 该表达式（可直接写 GROUP BY 1，多分组维度时按 SELECT 顺序编号）；\n"
+                "- 边界值与标签必须逐字来自上述定义，禁止自行编造区间；分箱字段名必须是映射结果中的确切字段。")
         # 计数类指标：提示 LLM 统计执行/调用记录表，避免对定义表 COUNT（每行恒为 1）
         _cnt_names = [m.get("name", "") for m in (spec_data.get("metrics") or [])]
         if any(any(k in n for k in ("次数", "调用", "访问", "请求")) for n in _cnt_names):
@@ -1200,10 +1435,10 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
     user_prompt = f"""【历史对话】
 {history_text or "（无）"}
 {confirmed_section}
-【可用表与字段（格式：表名: 字段(类型·注释)，已按选中表过滤）】
+【可用表与字段（格式：表名: 字段(类型·注释)，★=优先推荐字段，已按选中表过滤）】
 {schema}
-
-{biz_semantics}
+{recommend_section}
+{evidence_section}
 
 【JOIN 路径】
 {joins}

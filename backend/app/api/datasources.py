@@ -8,7 +8,7 @@ from ..database import get_db
 from ..models import ColumnMeta, Datasource, Relationship, TableMeta
 from ..security import aes_encrypt
 from ..services.datasource_service import sync_schema, test_connection
-from .common import apply_fields, get_owned_or_404, soft_delete, workspace_scope
+from .common import apply_fields, get_or_404, get_owned_or_404, soft_delete, workspace_scope
 from .deps import get_current_user
 
 router = APIRouter(prefix="/datasources", tags=["datasources"])
@@ -141,6 +141,15 @@ def update_comment(col_id: int, body: CommentIn, db: Session = Depends(get_db),
                    user=Depends(get_current_user)):
     col = get_or_404(db, ColumnMeta, col_id, "字段不存在")
     col.comment = body.comment
+    db.commit()
+    return {"ok": True}
+
+
+@router.put("/tables/{table_id}/comment")
+def update_table_comment(table_id: int, body: CommentIn, db: Session = Depends(get_db),
+                         user=Depends(get_current_user)):
+    tbl = get_or_404(db, TableMeta, table_id, "表不存在")
+    tbl.comment = body.comment
     db.commit()
     return {"ok": True}
 

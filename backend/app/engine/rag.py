@@ -9,6 +9,8 @@ from ..llm import LLMClient, LLMError
 from ..models import Datasource, DocChunk, FaqPair, SqlExample, Workspace
 from .llm_provider import resolve_embed_client, resolve_llm_client
 from ..vector_store import VectorStore
+from .text_utils import tokenize
+from .biz_lexicon import get as lex_get
 
 logger = logging.getLogger(__name__)
 
@@ -125,26 +127,11 @@ def _owner_ws(doc_id: int) -> int:
         db.close()
 
 
-# 纯疑问通用词（不计入实体词重叠，避免「有哪些/什么」类泛匹配）
-_GENERIC_QWORDS = {"哪些", "什么", "如何", "怎么", "怎样", "为啥", "为什么", "是否", "多少"}
-
-
-def _kw_set(text: str) -> set[str]:
-    """关键词集合：英文/数字词 + 中文 2-gram 滑窗。"""
-    words: set[str] = set()
-    words.update(re.findall(r"[a-z0-9_]{2,}", text.lower()))
-    for seg in re.findall(r"[\u4e00-\u9fa5]+", text.lower()):
-        if len(seg) >= 2:
-            words.add(seg)
-            for i in range(len(seg) - 1):
-                words.add(seg[i:i + 2])
-    return words
-
-
 def _entity_overlap(a: str, b: str) -> bool:
     """a 与 b 是否有实质实体词重叠（排除纯疑问通用词）。
     用于 FAQ 命中校验：向量相似但无任何实体词重叠视为误命中。"""
-    return bool((_kw_set(a) & _kw_set(b)) - _GENERIC_QWORDS)
+    generic = set(lex_get("generic_question"))
+    return bool((tokenize(a) & tokenize(b)) - generic)
 
 
 def hybrid_search(workspace_id: int, query: str, kind: str = "doc",
@@ -196,7 +183,7 @@ def hybrid_search(workspace_id: int, query: str, kind: str = "doc",
         finally:
             db2.close()
     # 关键词补充
-    words = _kw_set(query)
+    words = tokenize(query)
     kw_hits: list[dict] = []
     db = SessionLocal()
     try:

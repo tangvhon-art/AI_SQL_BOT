@@ -66,6 +66,51 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
 
+def _emit_table_clarify(result: dict, datasource_id: int, question: str,
+                        conv_id: int, db: Session, log) -> list:
+    """统一表级澄清出口：发送表候选 summary + 落库 clarify 消息。
+
+    candidates 为空时（选表失败回退等）用全量业务表兜底，确保前端能渲染候选勾选框。
+    """
+    from ..engine.nl2sql import _all_business_tables
+    from ..models import Datasource, TableMeta
+    candidates = result.get("candidates") or []
+    text = result.get("explain") or "请勾选需要查询的表（可多选，将分别查询）"
+    table_hints = result.get("table_hints") or []
+    if not candidates:
+        try:
+            ds = db.query(Datasource).get(datasource_id)
+            schema_name = None
+            if ds:
+                all_t = _all_business_tables(db, datasource_id, schema_name)
+                candidates = [{"table": t.table_name, "comment": t.comment or ""}
+                              for t in all_t]
+                logger.info("[问数][%s][表澄清] candidates 为空，全量业务表兜底: %d 张",
+                            log.id, len(candidates))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[问数][%s][表澄清] 全量表兜底失败: %s", log.id, exc)
+    # 拆表检索词命中候选置顶（表名/表注释含检索词 → 排前面，用户优先可见）
+    if candidates and table_hints:
+        from ..engine.nl2sql import _hint_hit_index
+        candidates.sort(key=lambda c: _hint_hit_index(c.get("table", ""), c.get("comment") or "", table_hints))
+        _top = [c["table"] for c in candidates[:5]
+                if _hint_hit_index(c.get("table", ""), c.get("comment") or "", table_hints) < 99]
+        if _top:
+            logger.info("[问数][%s][表澄清] 拆表检索词 %s 命中候选置顶: %s",
+                        log.id, table_hints, _top)
+    cand_text = "；".join(f"{c['table']}（{c['comment'] or '无注释'}）"
+                          for c in candidates[:15]) or "（暂无可用表）"
+    yield _sse("summary", {"text": text, "candidates": candidates,
+                           "original_question": question})
+    db.add(ConversationMessage(
+        conversation_id=conv_id, role="assistant", content_type="clarify",
+        content_json={"text": text, "candidates": candidates,
+                      "original_question": question}))
+    log.clarify_count = (log.clarify_count or 0) + 1
+    logger.info("[问数][%s][表澄清] 发出表澄清: 候选 %d 张 | %s", log.id,
+                len(candidates), cand_text[:120])
+
+
 def _load_history(db: Session, conv_id: int) -> list[dict]:
     rows = (db.query(ConversationMessage)
             .filter(ConversationMessage.conversation_id == conv_id)
@@ -280,6 +325,8 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
             intent = detect_intent(body.question, history, llm)
             log.intent = intent
             _triage_labels = {"chat": "闲聊", "knowledge": "知识问答", "data": "数据问数"}
+            logger.info("[问数][%s][intent] 意图分诊: question=%r → %s",
+                        log.id, body.question[:60], intent)
             yield _sse("progress", {"stage": "intent", "msg": f"意图：{_triage_labels.get(intent, intent)}"})
 
             if intent == "chat":
@@ -296,7 +343,11 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
                 question, datasource_id, ws_id, llm=llm,
                 prev_spec=prev_spec, clarify_answer=body.clarify_answer,
                 dicts=dicts, schema_name=body.schema_name)
+            logger.info("[问数][%s][spec] parse_query_spec 结果: status=%s missing=%s"
+                        " | rewritten=%r", log.id, parse_result["status"],
+                        parse_result.get("missing"), question[:80])
             if parse_result["status"] == "refuse":
+                logger.info("[问数][%s][spec] refuse: %s", log.id, parse_result["message"])
                 yield _sse("summary", {"text": parse_result["message"]})
                 log.executed = False
                 db.commit()
@@ -306,6 +357,9 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
                 text = parse_result["message"]
                 candidates = parse_result.get("candidates") or []
                 missing = parse_result.get("missing") or []
+                logger.info("[问数][%s][spec] 澄清(%s): candidates=%d missing=%s",
+                            log.id, parse_result.get("kind", "spec"),
+                            len(candidates), missing)
                 yield _sse("summary", {"text": text, "candidates": candidates,
                                         "kind": "spec", "original_question": body.question,
                                         "missing": missing})
@@ -325,6 +379,11 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
             log.spec_json = spec_to_dict(spec)
             log.intent = spec.intent
             db.commit()
+            logger.info("[问数][%s][spec] spec: intent=%s metrics=%s dims=%s time=%s filters=%s",
+                        log.id, spec.intent,
+                        [(m.name, m.agg) for m in spec.metrics],
+                        [d.name for d in spec.dimensions],
+                        spec.time.expr or "", [f.field for f in spec.filters])
             yield _sse("spec", spec_to_dict(spec))
             yield _sse("progress", {"stage": "map",
                                     "msg": f"意图：{INTENT_LABELS.get(spec.intent, spec.intent)}"})
@@ -336,6 +395,9 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
             if table_clarify:
                 cand_text = "；".join(f"{c['table']}（{c['comment'] or '无注释'}）"
                                       for c in table_clarify)
+                logger.info("[问数][%s][表澄清] 多表歧义触发: %d 张候选 %s",
+                            log.id, len(table_clarify),
+                            [c["table"] for c in table_clarify])
                 yield _sse("summary", {
                     "text": f"您的问题对应多张表，请勾选需要查询的表（可多选，将分别查询）：{cand_text}",
                     "candidates": table_clarify, "original_question": body.question})
@@ -349,6 +411,8 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
                 db.commit()
                 yield _sse("done", {})
                 return
+            else:
+                logger.info("[问数][%s][表澄清] 未触发（表名/注释明确指向或 <2 张候选）", log.id)
 
             # ===== L3 数据源三层映射 =====
             # MappingError（如"使用率"等计算指标无直接字段）不再直接报错，
@@ -356,14 +420,19 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
             mapping = None
             try:
                 mapping = map_spec_to_schema(spec, datasource_id, user.id, dicts=dicts)
+                logger.info("[问数][%s][mapping] 字段映射成功: metrics=%s dims=%s",
+                            log.id,
+                            [(m.get("comment") or m.get("column")) for m in mapping.get("metrics", [])],
+                            [(d.get("comment") or d.get("column")) for d in mapping.get("dimensions", [])])
             except PermissionMappingError as exc:
+                logger.warning("[问数][%s][mapping] 权限映射失败: %s", log.id, exc)
                 yield _sse("error", {"code": "PERMISSION", "msg": str(exc)})
                 log.executed = False
                 db.commit()
                 yield _sse("done", {})
                 return
             except MappingError as exc:
-                logger.info("映射失败降级 LLM：%s", exc)
+                logger.info("[问数][%s][mapping] 映射失败降级 LLM：%s", log.id, exc)
                 mapping = None
             if mapping is not None:
                 log.mapping_json = {k: v for k, v in mapping.items() if k != "table"}
@@ -397,6 +466,11 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
                 if mapping is not None:
                     spec_context["mapping"] = {k: v for k, v in mapping.items() if k != "table"}
                 yield _sse("progress", {"stage": "generate", "msg": "正在生成 SQL…"})
+                logger.info("[问数][%s][generate] 进入 LLM 全表选表路径: used_template=%s "
+                            "is_table_confirm=%s spec_context=%s",
+                            log.id, used_template, is_table_confirm,
+                            {"spec": spec_context.get("spec", {}).get("intent"),
+                             "mapping": bool(spec_context.get("mapping"))})
                 result = None
                 history = _load_history(db, conv_id)  # 含本轮确认句，供 confirmed 选表锁定
                 for event in generate_sql_stream(datasource_id, ws_id, question,
@@ -409,8 +483,21 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
                         yield _sse("progress", {"stage": "generate", "msg": event["msg"]})
                     elif event["type"] == "result":
                         result = event["result"]
+                        logger.info("[问数][%s][generate] 生成结果: intent=%s sql_len=%d "
+                                    "candidates=%d", log.id, result.get("intent"),
+                                    len(result.get("sql") or ""),
+                                    len(result.get("candidates") or []))
                 if not result or not result.get("sql"):
                     reason = (result or {}).get("explain") or "无法生成 SQL"
+                    if (result or {}).get("intent") == "clarify":
+                        # 表级澄清（含选表失败回退的全表候选）：走统一 clarify 出口
+                        yield from _emit_table_clarify(result, datasource_id, body.question,
+                                                       conv_id, db, log)
+                        log.executed = False
+                        db.commit()
+                        yield _sse("done", {})
+                        return
+                    logger.warning("[问数][%s][generate] 无 SQL 结果: %s", log.id, reason)
                     yield _sse("summary", {"text": f"无法回答：{reason}"})
                     log.executed = False
                     log.fallback = True
@@ -425,14 +512,8 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
                     yield _sse("done", {})
                     return
                 if inner == "clarify":
-                    candidates = result.get("candidates") or []
-                    text = result.get("explain") or "您的问题对应多张表，请勾选需要查询的表"
-                    yield _sse("summary", {"text": text, "candidates": candidates,
-                                            "original_question": body.question})
-                    db.add(ConversationMessage(
-                        conversation_id=conv_id, role="assistant", content_type="clarify",
-                        content_json={"text": text, "candidates": candidates,
-                                      "original_question": body.question}))
+                    yield from _emit_table_clarify(result, datasource_id, body.question,
+                                                   conv_id, db, log)
                     log.executed = False
                     db.commit()
                     yield _sse("done", {})
@@ -531,7 +612,7 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
 
             # ===== L4 图表（意图驱动）=====
             yield _sse("progress", {"stage": "chart", "msg": "正在生成图表…"})
-            chart = build_chart_option(columns, rows, intent=spec.intent)
+            chart = build_chart_option(columns, rows, intent=spec.intent, llm=llm)
             log.chart_type = chart.get("type", "")
             db.commit()
             yield _sse("chart", chart)
@@ -572,6 +653,8 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
                 "template_sql": used_template,
                 "selected_tables": llm_selected_tables or [],
                 "select_source": llm_select_source or ("template" if used_template else ""),
+                "guidance_source": parse_result.get("guidance_source", ""),
+                "chart_source": chart.get("_source", ""),
             }
             yield _sse("trace", trace)
 
