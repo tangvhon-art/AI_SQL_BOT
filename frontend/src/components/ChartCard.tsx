@@ -219,8 +219,10 @@ export default function ChartCard({ chart }: { chart: ChartPayload }) {
     )
   }
 
-  // 图表容器与表格始终挂载，用 display 控制显隐：
+  // 图表容器始终挂载，用 display 控制显隐：
   // 避免表格模式下卸载图表容器→dispose 实例→还原推荐时重建实例的时序白屏问题。
+  // 表格改为仅激活时挂载：若在 display:none 容器中常驻挂载，Ant Table 会在隐藏状态下
+  // 测量容器宽度（结果为 0/陈旧值），切到表格视图时列宽被压缩成“挤压”状态，需二次切换才恢复。
   return (
     <div style={{ margin: '8px 0' }}>
       {renderToolbar()}
@@ -232,9 +234,7 @@ export default function ChartCard({ chart }: { chart: ChartPayload }) {
           display: showChart ? 'block' : 'none',
         }}
       />
-      <div style={{ display: showChart ? 'none' : 'block' }}>
-        {renderTable()}
-      </div>
+      {showChart ? null : renderTable()}
     </div>
   )
 }

@@ -43,6 +43,10 @@ export default function SavedQueryPage() {
 
   const submitSq = async () => {
     const v = await sqForm.validateFields()
+    if (typeof v.params === 'string') {
+      msgApi.error('参数 JSON 格式错误，应为数组，如 [{"key":"date","type":"date","default":"T-1"}]')
+      return
+    }
     const body = {
       name: v.name,
       sql_text: v.sql_text,
@@ -73,6 +77,10 @@ export default function SavedQueryPage() {
 
   const submitTask = async () => {
     const v = await taskForm.validateFields()
+    if (typeof v.param_values === 'string') {
+      msgApi.error('参数值 JSON 格式错误，应为对象，如 {"date":"T-1"}')
+      return
+    }
     try {
       if (editingTask) await client.put(`/scheduled-tasks/${editingTask.id}`, v)
       else await client.post('/scheduled-tasks', v)
@@ -146,11 +154,19 @@ export default function SavedQueryPage() {
                     <Form.Item name="sql_text" label="SQL（{param} 为参数占位符）" rules={[{ required: true }]}>
                       <Input.TextArea rows={5} placeholder="SELECT ... WHERE date = '{date}'" />
                     </Form.Item>
-                    <Form.Item name="params" label="参数（JSON，key/type/默认值）">
-                      <Input.TextArea rows={3} placeholder='[{"key":"date","type":"date","default":"T-1"}]'
-                        onChange={(e) => {
-                          try { sqForm.setFieldValue('params', JSON.parse(e.target.value)) } catch { /* 非法 JSON 忽略 */ }
-                        }} />
+                    <Form.Item
+                      name="params"
+                      label="参数（JSON，key/type/默认值）"
+                      getValueProps={(v) => ({ value: Array.isArray(v) ? JSON.stringify(v, null, 2) : (v ?? '') })}
+                      normalize={(v) => {
+                        if (!v) return []
+                        try {
+                          const j = JSON.parse(v)
+                          return Array.isArray(j) ? j : v
+                        } catch { return v }
+                      }}
+                    >
+                      <Input.TextArea rows={3} placeholder='[{"key":"date","type":"date","default":"T-1"}]' />
                     </Form.Item>
                     <Form.Item name="tags" label="标签"><Input /></Form.Item>
                     <Form.Item name="remark" label="备注"><Input /></Form.Item>
@@ -205,7 +221,18 @@ export default function SavedQueryPage() {
                     <Form.Item name="cron_expr" label="cron 表达式" rules={[{ required: true }]}>
                       <GlassSelect options={CRON_OPTIONS} showSearch allowClear placeholder="或自定义：daily 08:00 / hourly / interval 3600" />
                     </Form.Item>
-                    <Form.Item name="param_values" label="参数值（JSON，T-1 自动解析为昨日）">
+                    <Form.Item
+                      name="param_values"
+                      label="参数值（JSON，T-1 自动解析为昨日）"
+                      getValueProps={(v) => ({ value: v && typeof v === 'object' ? JSON.stringify(v, null, 2) : (v ?? '') })}
+                      normalize={(v) => {
+                        if (!v) return {}
+                        try {
+                          const j = JSON.parse(v)
+                          return j && typeof j === 'object' && !Array.isArray(j) ? j : v
+                        } catch { return v }
+                      }}
+                    >
                       <Input.TextArea rows={3} placeholder='{"date": "T-1"}' />
                     </Form.Item>
                     <Form.Item name="status" label="状态">

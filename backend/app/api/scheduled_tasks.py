@@ -52,8 +52,14 @@ def create_saved(body: SavedQueryIn, db: Session = Depends(get_db),
 def update_saved(sq_id: int, body: SavedQueryIn, db: Session = Depends(get_db),
                  user=Depends(get_current_user)):
     sq = get_or_404(db, SavedQuery, sq_id, "保存查询不存在")
-    for f in ("name", "sql_text", "params", "chart_config", "tags", "remark"):
-        setattr(sq, f, getattr(body, f))
+    # 注意：请求字段 params/chart_config 对应 ORM 的 params_json/chart_config_json，
+    # 不能用请求字段名循环 setattr（会写到不存在的属性上导致静默丢失）
+    sq.name = body.name
+    sq.sql_text = body.sql_text
+    sq.params_json = body.params
+    sq.chart_config_json = body.chart_config
+    sq.tags = body.tags
+    sq.remark = body.remark
     db.commit()
     return _sq_out(sq)
 

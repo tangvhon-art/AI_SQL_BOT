@@ -1,8 +1,9 @@
 // 对话页（豆包式全屏聊天）：历史收起到抽屉、消息流居中、底部多行输入、发送后追加到底部
 import { useEffect, useRef, useState } from 'react'
 import {
- Button, Drawer, Dropdown, Input, List, Space, Spin, Tag, Tooltip, Typography,
+ Button, Drawer, Dropdown, Input, List, Modal, Space, Spin, Tag, Tooltip, Typography,
 } from 'antd'
+import type { InputRef } from 'antd'
 import {
   HistoryOutlined, PlusOutlined, ArrowUpOutlined, DownOutlined,
 } from '@ant-design/icons'
@@ -28,6 +29,13 @@ export default function ChatPage() {
   const [modelList, setModelList] = useState<Array<{ id: number; name: string; model_name: string; is_default: boolean; scene: string }>>([])
   const [modelId, setModelId] = useState<number | null>(null)
   const [histOpen, setHistOpen] = useState(false)
+
+  // ========== 保存为查询（AntD Modal 代替原生 prompt）==========
+  const [saveOpen, setSaveOpen] = useState(false)
+  const [saveName, setSaveName] = useState('')
+  const [saving, setSaving] = useState(false)
+  const saveMsgRef = useRef<ChatMsg | null>(null)
+  const saveInputRef = useRef<InputRef>(null)
   const {
     conversations, currentConvId, messages, streaming, stage,
     setConversations, setCurrentConvId, setMessages, appendUser, appendStreamMsg, setStreaming, setStage,
@@ -336,14 +344,28 @@ export default function ChatPage() {
     }
   }
 
-  const saveQuery = async (msg: ChatMsg) => {
-    const name = window.prompt('保存为查询名称：', `查询 ${new Date().toLocaleString()}`)
-    if (!name) return
+  const saveQuery = (msg: ChatMsg) => {
     const sql = String((msg.content as Record<string, unknown>).sql ?? '')
     if (!sql) {
       msgApi.warning('该消息无可用 SQL')
       return
     }
+    saveMsgRef.current = msg
+    setSaveName(`查询 ${new Date().toLocaleString()}`)
+    setSaveOpen(true)
+  }
+
+  const submitSave = async () => {
+    const msg = saveMsgRef.current
+    const name = saveName.trim()
+    if (!msg || !name) return
+    const sql = String((msg.content as Record<string, unknown>).sql ?? '')
+    if (!sql) {
+      msgApi.warning('该消息无可用 SQL')
+      setSaveOpen(false)
+      return
+    }
+    setSaving(true)
     try {
       await client.post('/saved-queries', {
         name,
@@ -352,8 +374,11 @@ export default function ChatPage() {
         chart_config: {},
       })
       msgApi.success('已保存，可在「保存查询」中复用')
+      setSaveOpen(false)
     } catch (e) {
       toastError(e)
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -631,6 +656,30 @@ export default function ChatPage() {
           )}
         />
       </Drawer>
+
+      {/* ---------- 保存为查询弹窗（AntD Modal）---------- */}
+      <Modal
+        title="保存为查询"
+        open={saveOpen}
+        onOk={submitSave}
+        onCancel={() => setSaveOpen(false)}
+        okText="确定"
+        cancelText="取消"
+        confirmLoading={saving}
+        okButtonProps={{ disabled: !saveName.trim() }}
+        afterOpenChange={(open) => { if (open) saveInputRef.current?.focus() }}
+        width={420}
+      >
+        <div style={{ marginBottom: 8, fontWeight: 500 }}>保存为查询名称：</div>
+        <Input
+          ref={saveInputRef}
+          value={saveName}
+          onChange={(e) => setSaveName(e.target.value)}
+          placeholder="请输入查询名称"
+          maxLength={100}
+          onPressEnter={submitSave}
+        />
+      </Modal>
 
       {/* ---------- 主体：空会话整体居中 / 有消息时消息在上输入框贴底 ---------- */}
       {messages.length === 0 ? (
