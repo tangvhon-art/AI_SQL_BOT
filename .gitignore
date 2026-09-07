@@ -1,0 +1,11 @@
+/docs/
+backend/.venv/
+backend/uploads/
+backend/ai_infra.db
+backend/.env
+backend/__pycache__/
+backend/**/__pycache__/
+frontend/node_modules/
+frontend/dist/
+.DS_Store
+/logs/

@@ -1,0 +1,401 @@
+/* ============ Ant Design Pro v6 · Glass（玻璃拟态）风格 ============ */
+:root {
+  --glass-bg: rgba(255, 255, 255, 0.6);
+  --glass-bg-strong: rgba(255, 255, 255, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.72);
+  --glass-shadow: 0 8px 32px rgba(31, 58, 147, 0.1);
+  --glass-blur: blur(18px) saturate(150%);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 全局光斑背景 */
+.glass-app {
+  position: relative;
+  min-height: 100vh;
+  background:
+    radial-gradient(1100px 700px at 12% -8%, rgba(22, 119, 255, 0.16), transparent 60%),
+    radial-gradient(900px 650px at 88% 8%, rgba(114, 46, 209, 0.12), transparent 55%),
+    radial-gradient(1000px 800px at 50% 115%, rgba(0, 174, 239, 0.14), transparent 60%),
+    linear-gradient(160deg, #f2f6ff 0%, #eef4ff 45%, #f4f0ff 100%);
+  background-attachment: fixed;
+}
+.glass-app::before,
+.glass-app::after {
+  content: '';
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(70px);
+  pointer-events: none;
+  z-index: 0;
+}
+.glass-app::before {
+  width: 480px;
+  height: 480px;
+  left: -140px;
+  top: 10%;
+  background: rgba(22, 119, 255, 0.18);
+}
+.glass-app::after {
+  width: 420px;
+  height: 420px;
+  right: -120px;
+  bottom: 6%;
+  background: rgba(114, 46, 209, 0.14);
+}
+
+/* ---------- 侧边栏玻璃 ---------- */
+.glass-sider.ant-layout-sider {
+  background: rgba(12, 28, 58, 0.52) !important;
+  backdrop-filter: blur(22px) saturate(150%);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  border-right: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 4px 0 24px rgba(20, 40, 90, 0.12);
+  z-index: 2;
+}
+.glass-sider .ant-menu-dark {
+  background: transparent !important;
+}
+.glass-sider .ant-menu-dark .ant-menu-item-selected {
+  background: linear-gradient(135deg, rgba(22, 119, 255, 0.85), rgba(105, 177, 255, 0.7)) !important;
+  box-shadow: 0 6px 18px rgba(22, 119, 255, 0.35);
+  border-radius: 10px;
+}
+.glass-sider .ant-menu-dark .ant-menu-item {
+  border-radius: 10px;
+  margin-inline: 10px;
+  width: calc(100% - 20px);
+}
+/* ---------- 二级子菜单：融入深色玻璃，避免违和 ---------- */
+.glass-sider .ant-menu-dark .ant-menu-sub {
+  background: transparent !important;
+}
+.glass-sider .ant-menu-dark .ant-menu-submenu-title {
+  color: rgba(255, 255, 255, 0.82);
+  border-radius: 10px;
+  margin-inline: 10px;
+  width: calc(100% - 20px);
+}
+.glass-sider .ant-menu-dark .ant-menu-submenu-title:hover {
+  color: rgba(255, 255, 255, 0.95);
+  background: rgba(255, 255, 255, 0.07);
+}
+.glass-sider .ant-menu-dark .ant-menu-submenu-selected .ant-menu-submenu-title {
+  color: #fff;
+}
+.glass-sider .ant-menu-dark .ant-menu-sub .ant-menu-item {
+  color: rgba(255, 255, 255, 0.62);
+  background: transparent;
+  margin-inline: 10px 14px;
+  width: calc(100% - 24px);
+}
+.glass-sider .ant-menu-dark .ant-menu-sub .ant-menu-item .ant-menu-item-icon {
+  color: rgba(255, 255, 255, 0.5);
+}
+.glass-sider .ant-menu-dark .ant-menu-sub .ant-menu-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.92);
+}
+.glass-sider .ant-menu-dark .ant-menu-sub .ant-menu-item:hover .ant-menu-item-icon {
+  color: rgba(255, 255, 255, 0.85);
+}
+.glass-sider .ant-menu-dark .ant-menu-sub .ant-menu-item-selected {
+  background: linear-gradient(135deg, rgba(22, 119, 255, 0.55), rgba(105, 177, 255, 0.38)) !important;
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(22, 119, 255, 0.28);
+}
+.glass-sider .ant-menu-dark .ant-menu-sub .ant-menu-item-selected .ant-menu-item-icon {
+  color: #fff;
+}
+.glass-sider .ant-layout-sider-trigger {
+  background: rgba(12, 28, 58, 0.55);
+  backdrop-filter: blur(12px);
+}
+
+/* ---------- 顶部 Header 玻璃 ---------- */
+.glass-header.ant-layout-header {
+  background: rgba(255, 255, 255, 0.55) !important;
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.65);
+  box-shadow: 0 1px 10px rgba(31, 58, 147, 0.08);
+  z-index: 3;
+}
+
+/* ---------- 内容区 ---------- */
+.glass-content.ant-layout-content {
+  background: transparent !important;
+}
+
+/* ---------- 卡片玻璃 ---------- */
+.glass-card,
+.glass-page .ant-card {
+  background: var(--glass-bg) !important;
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border) !important;
+  border-radius: 16px !important;
+  box-shadow: var(--glass-shadow);
+  overflow: hidden;
+}
+.glass-page .ant-card-head {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.6);
+  background: rgba(255, 255, 255, 0.25);
+}
+.glass-page .ant-card .ant-card-body {
+  background: transparent;
+}
+
+/* ---------- 表格透明化 ---------- */
+.glass-page .ant-table,
+.glass-page .ant-table-container,
+.glass-page .ant-table-wrapper .ant-table-thead > tr > th,
+.glass-page .ant-table-wrapper .ant-table-tbody > tr > td {
+  background: transparent !important;
+}
+.glass-page .ant-table-wrapper .ant-table-thead > tr > th {
+  border-bottom: 1px solid rgba(5, 5, 5, 0.06);
+}
+.glass-page .ant-table-wrapper .ant-table-tbody > tr:hover > td {
+  background: rgba(22, 119, 255, 0.05) !important;
+}
+
+/* ---------- 问数结果表格：点击行可展开 ---------- */
+.chart-table-row-clickable .ant-table-row {
+  cursor: pointer;
+}
+
+/* ---------- 弹窗 / 抽屉玻璃 ---------- */
+.ant-modal-content,
+.ant-drawer-content,
+.ant-drawer-content-wrapper {
+  background: rgba(255, 255, 255, 0.82) !important;
+  backdrop-filter: blur(24px) saturate(150%);
+  -webkit-backdrop-filter: blur(24px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+}
+.ant-modal-content {
+  border-radius: 18px !important;
+  box-shadow: 0 24px 64px rgba(20, 40, 90, 0.22) !important;
+}
+
+/* ---------- 表单输入玻璃 ---------- */
+.glass-page .ant-input,
+.glass-page .ant-input-affix-wrapper,
+.glass-page .ant-select-content,
+.glass-page .ant-picker,
+.glass-page .ant-input-number {
+  background: rgba(255, 255, 255, 0.65) !important;
+  backdrop-filter: blur(8px);
+  border-color: rgba(255, 255, 255, 0.85);
+  box-shadow: inset 0 1px 3px rgba(31, 58, 147, 0.04);
+}
+
+/* ---------- 下拉框统一玻璃（全局，适配 antd v6 结构） ---------- */
+.glass-select .ant-select-content {
+  background: rgba(255, 255, 255, 0.6) !important;
+  backdrop-filter: blur(10px) saturate(150%);
+  -webkit-backdrop-filter: blur(10px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.85) !important;
+  box-shadow: 0 2px 10px rgba(31, 58, 147, 0.06);
+  border-radius: 10px;
+}
+.glass-select:hover .ant-select-content {
+  border-color: rgba(105, 177, 255, 0.9) !important;
+}
+.ant-select-dropdown {
+  background: rgba(255, 255, 255, 0.88) !important;
+  backdrop-filter: blur(22px) saturate(160%);
+  -webkit-backdrop-filter: blur(22px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-radius: 12px !important;
+  box-shadow: 0 16px 48px rgba(31, 58, 147, 0.18) !important;
+  padding: 4px;
+}
+.ant-select-dropdown .ant-select-item-option-selected {
+  background: rgba(22, 119, 255, 0.12) !important;
+  font-weight: 500;
+}
+.ant-select-dropdown .ant-select-item-option-active {
+  background: rgba(22, 119, 255, 0.06) !important;
+}
+.ant-select-dropdown .ant-select-item {
+  border-radius: 8px !important;
+}
+.glass-page .ant-btn {
+  box-shadow: 0 4px 14px rgba(22, 119, 255, 0.12);
+}
+.glass-page .ant-btn-primary,
+.glass-chat-input .ant-btn-primary {
+  background: linear-gradient(135deg, #1677ff, #4096ff) !important;
+  border: none;
+  box-shadow: 0 6px 18px rgba(22, 119, 255, 0.32);
+}
+.glass-page .ant-btn-primary:hover,
+.glass-chat-input .ant-btn-primary:hover {
+  background: linear-gradient(135deg, #0958d9, #1677ff) !important;
+}
+
+/* ---------- 标签 / 分割线 ---------- */
+.glass-page .ant-tag {
+  backdrop-filter: blur(8px);
+}
+.glass-page .ant-divider {
+  border-color: rgba(5, 5, 5, 0.08);
+}
+
+/* ---------- 登录页 ---------- */
+.glass-login-card.ant-card {
+  background: rgba(255, 255, 255, 0.6) !important;
+  backdrop-filter: blur(26px) saturate(160%);
+  -webkit-backdrop-filter: blur(26px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  border-radius: 22px !important;
+  box-shadow: 0 24px 80px rgba(20, 40, 90, 0.24);
+}
+
+/* ---------- 聊天区玻璃 ---------- */
+.glass-msg-user {
+  background: linear-gradient(135deg, rgba(22, 119, 255, 0.9), rgba(64, 150, 255, 0.82)) !important;
+  color: #fff !important;
+  border-radius: 14px 14px 4px 14px !important;
+  box-shadow: 0 8px 24px rgba(22, 119, 255, 0.28);
+  border: none !important;
+}
+.glass-msg-assistant {
+  background: rgba(255, 255, 255, 0.62) !important;
+  backdrop-filter: blur(16px) saturate(150%);
+  -webkit-backdrop-filter: blur(16px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.75) !important;
+  border-radius: 14px 14px 14px 4px !important;
+  box-shadow: var(--glass-shadow);
+}
+.glass-chat-input .ant-input {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+}
+.glass-chat-input .ant-input:focus,
+.glass-chat-input .ant-input:focus-visible,
+.glass-chat-input .ant-input-focused,
+.glass-chat-input textarea:focus,
+.glass-chat-input textarea:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+  border-color: transparent !important;
+}
+.glass-chat-input .ant-btn-primary {
+  border-radius: 50% !important;
+}
+
+/* ============ 玻璃风格滚动条（全站统一） ============ */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(22, 119, 255, 0.38), rgba(105, 177, 255, 0.3));
+  border-radius: 8px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(22, 119, 255, 0.6), rgba(105, 177, 255, 0.5));
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(22, 119, 255, 0.4) rgba(255, 255, 255, 0.25);
+}
+
+/* 步骤条脉冲动画 */
+@keyframes chatStepPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.8); }
+}
+
+/* ===== AI 回复 Markdown 渲染 ===== */
+.md-body {
+  font-size: 14px;
+  line-height: 1.75;
+  color: rgba(0, 0, 0, 0.88);
+  word-break: break-word;
+}
+.md-body > *:first-child { margin-top: 0; }
+.md-body > *:last-child { margin-bottom: 0; }
+.md-body p { margin: 0.5em 0; }
+.md-body h1, .md-body h2, .md-body h3, .md-body h4 {
+  margin: 1em 0 0.5em;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.md-body h1 { font-size: 1.4em; }
+.md-body h2 { font-size: 1.25em; }
+.md-body h3 { font-size: 1.12em; }
+.md-body h4 { font-size: 1em; }
+.md-body ul, .md-body ol { margin: 0.5em 0; padding-left: 1.5em; }
+.md-body li { margin: 0.25em 0; }
+.md-body code {
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.06);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+.md-body pre {
+  margin: 0.6em 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: #1e1e2e;
+  overflow-x: auto;
+}
+.md-body pre code {
+  padding: 0;
+  background: transparent;
+  color: #e6e6e6;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.md-body table {
+  margin: 0.6em 0;
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+.md-body th, .md-body td {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  padding: 6px 10px;
+  text-align: left;
+}
+.md-body th {
+  background: rgba(22, 119, 255, 0.06);
+  font-weight: 600;
+}
+.md-body blockquote {
+  margin: 0.6em 0;
+  padding: 4px 12px;
+  border-left: 3px solid rgba(22, 119, 255, 0.4);
+  background: rgba(22, 119, 255, 0.04);
+  color: rgba(0, 0, 0, 0.65);
+}
+.md-body a { color: #1677ff; text-decoration: none; }
+.md-body a:hover { text-decoration: underline; }
+.md-body hr { border: none; border-top: 1px solid rgba(0, 0, 0, 0.1); margin: 0.8em 0; }
