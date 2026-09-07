@@ -83,7 +83,7 @@ def inject_soft_delete(sql: str, datasource_id: int, question: str, db) -> str:
     for sel in selects:
         # 仅统计本 SELECT 自身 FROM/JOIN 作用域的表（不含 WITH CTE 内部表，避免外层误注入）
         sel_tables: set[str] = set()
-        fr = sel.args.get("from")
+        fr = sel.args.get("from_") if "from_" in sel.args else sel.args.get("from")
         if fr is not None:
             sel_tables.update(t.alias_or_name for t in fr.find_all(exp.Table))
         for j in sel.args.get("joins") or []:

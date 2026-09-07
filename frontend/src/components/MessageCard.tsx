@@ -78,11 +78,23 @@ function TracePanel({ trace }: { trace: Record<string, unknown> }) {
   const filters = (mapping.filters ?? []) as Array<{ field?: string; column?: string; op?: string; value?: unknown }>
   const timeField = (mapping.time_field ?? {}) as { column?: string; comment?: string } | null
   const time = (trace.time ?? {}) as { expr?: string; start?: string; end?: string; granularity?: string }
+  // 数据源表：优先带注释明细，回退纯表名列表
+  const tableDetails = (trace.table_details ?? []) as Array<{ table?: string; comment?: string }>
+  const tablesTxt = tableDetails.length
+    ? tableDetails.map((t) => (t.comment ? `${t.table}（${t.comment}）` : t.table)).join('、')
+    : String(((trace.tables ?? []) as string[])?.join('、') || '—')
+  // 列名缺失（LLM 兜底路径无字段级映射）时省略 .column，避免展示"表.undefined"
+  const fmtMetric = (m: { name?: string; table?: string; column?: string; agg?: string }) =>
+    `${m.name}→${m.table || '?'}${m.column ? `.${m.column}` : ''}(${m.agg ?? 'sum'})`
+  const fmtDim = (d: { name?: string; table?: string; column?: string }) =>
+    `${d.name}→${d.table || '?'}${d.column ? `.${d.column}` : ''}`
+  const fmtFilter = (f: { field?: string; column?: string; op?: string; value?: unknown }) =>
+    `${f.field} ${f.op ?? '='} ${String(f.value ?? '')}${f.column ? `→${f.column}` : '（LLM 翻译字段）'}`
   const items = [
-    { key: 'tables', label: '数据源表', children: String(((trace.tables ?? []) as string[])?.join('、') || '—') },
-    { key: 'metrics', label: '指标映射', children: metrics.length ? metrics.map((m) => `${m.name}→${m.table}.${m.column}(${m.agg ?? 'sum'})`).join('；') : '—' },
-    { key: 'dims', label: '维度映射', children: dims.length ? dims.map((d) => `${d.name}→${d.table}.${d.column}`).join('；') : '—' },
-    { key: 'filters', label: '条件映射', children: filters.length ? filters.map((f) => `${f.field} ${f.op ?? '='} ${String(f.value ?? '')}→${f.column ?? ''}`).join('；') : '—' },
+    { key: 'tables', label: '数据源表', children: tablesTxt },
+    { key: 'metrics', label: '指标映射', children: metrics.length ? metrics.map(fmtMetric).join('；') : '—' },
+    { key: 'dims', label: '维度映射', children: dims.length ? dims.map(fmtDim).join('；') : '—' },
+    { key: 'filters', label: '条件映射', children: filters.length ? filters.map(fmtFilter).join('；') : '—' },
     { key: 'time', label: '时间口径', children: time.expr ? `${time.expr}（${time.start ?? ''}~${time.end ?? ''}，粒度 ${time.granularity ?? '-'}）` : '—' },
     { key: 'permission', label: '权限注入', children: String(trace.permission ?? '—') },
     { key: 'latency', label: '耗时', children: `${String(trace.latency_ms ?? '-')} ms` },

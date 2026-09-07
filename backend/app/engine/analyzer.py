@@ -44,9 +44,76 @@ def _where_sql(mapping: dict, spec: QuerySpec, time_range: tuple[str, str] | Non
         pref = _qtable(table, spec, dialect) if table else ""
         conds.append(f"{pref + '.' if pref else ''}`{col}` {f['op']} {_quote_value(f['value'], f['op'])}")
     if time_range and tcol:
-        s, e = time_range
-        conds.append(f"`{tcol}` BETWEEN '{s}' AND '{e}'")
+        # 相对时间（近N天/昨天/本月等）：参数化为基于 CURDATE() 的区间，不写死固定日期
+        rel_cond = _relative_time_cond(tcol, spec.time.expr) if spec.time else None
+        if rel_cond:
+            conds.append(rel_cond)
+        else:
+            s, e = time_range
+            conds.append(f"`{tcol}` BETWEEN '{s}' AND '{e}'")
     return (" WHERE " + " AND ".join(conds)) if conds else ""
+
+
+_REL_DAY_RE = re.compile(r"^(?:近|最近|过去|前)\s*(\d{1,3})\s*(?:天|日)")
+_REL_WEEK_RE = re.compile(r"^(?:近|最近|过去|前)\s*(\d{1,3})\s*周")
+_REL_MONTH_RE = re.compile(r"^(?:近|最近|过去|前)\s*(\d{1,3})\s*个?月")
+
+
+def _relative_time_cond(tcol: str, expr: str) -> str | None:
+    """相对时间表达 → 基于数据库当前日期的参数化条件（左闭右开，含今天/本周/本月）。
+
+    命中相对时间（近N天/昨天/本月/本周/今年等）返回条件 SQL；无法识别返回 None（走字面量）。
+    起点取当天 0 点、终点取截止日次日 0 点；「过去N天/近N天」= 含今天在内的最近 N 个自然日。
+    """
+    e = (expr or "").strip()
+    if not e:
+        return None
+    # 过去N天/近N天/最近N天/前N天（含今天；容忍「（默认）」等后缀）
+    m = _REL_DAY_RE.match(e)
+    if m:
+        n = int(m.group(1))
+        return (f"`{tcol}` >= DATE_SUB(CURDATE(), INTERVAL {n - 1} DAY) "
+                f"AND `{tcol}` < DATE_ADD(CURDATE(), INTERVAL 1 DAY)")
+    # 昨天 / 今天 / 前天
+    if e.startswith("昨天"):
+        return f"`{tcol}` >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND `{tcol}` < CURDATE()"
+    if e.startswith("今天"):
+        return f"`{tcol}` >= CURDATE() AND `{tcol}` < DATE_ADD(CURDATE(), INTERVAL 1 DAY)"
+    if e.startswith("前天"):
+        return (f"`{tcol}` >= DATE_SUB(CURDATE(), INTERVAL 2 DAY) "
+                f"AND `{tcol}` < DATE_SUB(CURDATE(), INTERVAL 1 DAY)")
+    # 近N周（含本周）
+    m = _REL_WEEK_RE.match(e)
+    if m:
+        n = int(m.group(1))
+        return (f"`{tcol}` >= DATE_SUB(CURDATE(), INTERVAL {n * 7 - 1} DAY) "
+                f"AND `{tcol}` < DATE_ADD(CURDATE(), INTERVAL 1 DAY)")
+    # 近N个月（含本月）
+    m = _REL_MONTH_RE.match(e)
+    if m:
+        n = int(m.group(1))
+        return (f"`{tcol}` >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL {n - 1} MONTH), '%Y-%m-01') "
+                f"AND `{tcol}` < DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 1 MONTH)")
+    # 本月 / 上月 / 本周 / 上周 / 今年 / 去年
+    if e.startswith("本月") or e.startswith("这月") or e.startswith("当月") or e.startswith("这个月"):
+        return (f"`{tcol}` >= DATE_FORMAT(CURDATE(), '%Y-%m-01') "
+                f"AND `{tcol}` < DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 1 MONTH)")
+    if e.startswith("上月") or e.startswith("上个月"):
+        return (f"`{tcol}` >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01') "
+                f"AND `{tcol}` < DATE_FORMAT(CURDATE(), '%Y-%m-01')")
+    if e.startswith("本周") or e.startswith("这周"):
+        return (f"`{tcol}` >= DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY) "
+                f"AND `{tcol}` < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY), INTERVAL 1 WEEK)")
+    if e.startswith("上周"):
+        return (f"`{tcol}` >= DATE_SUB(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY), INTERVAL 1 WEEK) "
+                f"AND `{tcol}` < DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY)")
+    if e.startswith("今年") or e.startswith("本年"):
+        return (f"`{tcol}` >= DATE_FORMAT(CURDATE(), '%Y-01-01') "
+                f"AND `{tcol}` < DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR)")
+    if e.startswith("去年") or e.startswith("上年"):
+        return (f"`{tcol}` >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 YEAR), '%Y-01-01') "
+                f"AND `{tcol}` < DATE_FORMAT(CURDATE(), '%Y-01-01')")
+    return None
 
 
 def _time_filter(mapping: dict, spec: QuerySpec) -> tuple[str, str] | None:

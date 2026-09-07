@@ -654,14 +654,58 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
                                     "anomalies": anomalies})
 
             # ===== L5 溯源 =====
+            # 字段级映射（模板路径）或 LLM 兜底组装可读口径：
+            # LLM 兜底路径 mapping 为 None → 从最终 SQL 提取真实来源表（权威），
+            # 指标/维度/条件用 spec + 来源表组装展示（标注 LLM 翻译，不伪造字段级映射）
+            _mapping_out = {k: v for k, v in (mapping or {}).items() if k != "table"}
+            _trace_tables: list[str] = []
+            for _m in (mapping or {}).get("metrics", []):
+                if _m.get("table") and _m["table"] not in _trace_tables:
+                    _trace_tables.append(_m["table"])
+            if not _trace_tables:
+                from ..engine.sql_trace import extract_sql_tables
+                _sql_tables = extract_sql_tables(sql, dialect)
+                if _sql_tables:
+                    _trace_tables = _sql_tables
+                elif llm_selected_tables:
+                    _trace_tables = [t.get("table_name") or t.get("table") or ""
+                                     for t in llm_selected_tables]
+                    _trace_tables = [t for t in _trace_tables if t]
+            # 来源表注释（数据源表展示更可读）
+            _table_comments: dict[str, str] = {}
+            if _trace_tables:
+                from ..models import TableMeta
+                for _tm in (db.query(TableMeta)
+                            .filter(TableMeta.datasource_id == datasource_id,
+                                    TableMeta.table_name.in_(_trace_tables)).all()):
+                    _table_comments[_tm.table_name] = _tm.comment or ""
+            _tables_disp = "、".join(
+                f"{t}（{_table_comments[t]}）" if _table_comments.get(t) else t
+                for t in _trace_tables)
+            if not _mapping_out.get("metrics") and _trace_tables and spec.metrics:
+                _mapping_out["metrics"] = [{
+                    "name": m.name or m.alias or "指标", "table": _tables_disp,
+                    "column": "", "agg": m.agg or "sum",
+                } for m in spec.metrics]
+            if not _mapping_out.get("dimensions") and _trace_tables and spec.dimensions:
+                _mapping_out["dimensions"] = [{
+                    "name": d.name or "维度", "table": _tables_disp, "column": "",
+                } for d in spec.dimensions]
+            if not _mapping_out.get("filters") and spec.filters:
+                _mapping_out["filters"] = [{
+                    "field": f.field, "op": f.op or "=", "value": f.value,
+                    "column": "", "table": _tables_disp,
+                } for f in spec.filters]
             trace = {
                 "intent": spec.intent,
                 "spec": spec_to_dict(spec),
                 "schema": spec.schema or "",
-                "mapping": {k: v for k, v in (mapping or {}).items() if k != "table"},
+                "mapping": _mapping_out,
                 "sql": exec_result["sql"],
                 "permission": exec_result["permission"],
-                "tables": [m["table"] for m in (mapping or {}).get("metrics", [])],
+                "tables": _trace_tables,
+                "table_details": [{"table": t, "comment": _table_comments.get(t, "")}
+                                  for t in _trace_tables],
                 "latency_ms": exec_result["latency_ms"],
                 "time": spec.time.model_dump(mode="json") if spec.time else None,
                 "template_sql": used_template,

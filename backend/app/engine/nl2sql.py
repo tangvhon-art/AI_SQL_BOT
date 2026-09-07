@@ -47,6 +47,19 @@ def _detect_non_sql_answer(content: str) -> str | None:
     return "chat"
 
 
+# 相对时间表达（近7天/本月/昨天等）：命中时 SQL 必须参数化，禁止写死固定日期
+_TIME_RELATIVE_RE = re.compile(
+    r"(?:近|最近|过去|前)\s*\d{1,3}\s*(?:天|日|周|个?月)"
+    r"|(?:上|本|这|当|今|下)\s*(?:个?月|个?季度|季度|季)"
+    r"|(?:去|今|本|这|明)\s*年"
+    r"|昨天|今天|前天|上周|本周|下周|上月|本月|下月"
+)
+
+
+def _is_relative_time_expr(expr: str) -> bool:
+    return bool(expr and _TIME_RELATIVE_RE.search(expr))
+
+
 SYSTEM_PROMPT = """你是企业数据问数助手，负责把用户中文问题转换为可执行、可直接运行的 SQL。
 
 ## 核心指令
@@ -104,7 +117,13 @@ LIMIT 分页参数;
 ## 六、系统硬性约束
 1. 仅允许 SELECT 查询，禁止 INSERT/UPDATE/DELETE/DDL/多语句、禁止注释注入
 2. 只能使用【可用表与字段】中列出的表与字段；**WHERE / GROUP BY / HAVING / ORDER BY 引用的每一个字段，都必须能在【可用表与字段】的对应表名下找到**；Schema 中不存在的字段一律禁止使用（例如某表没有 is_deleted 软删字段时，禁止写 `is_deleted = 0`，也不得想当然补充）；字段类型与注释见 Schema
-3. 涉及时间时使用数据库当前日期函数（如 CURDATE()/now()），不得使用固定日期
+3. **相对时间必须参数化，禁止固定日期**：用户问「过去N天/近N天/最近N天/昨天/今天/本周/本月」等相对时间时，必须基于数据库当前日期函数（CURDATE()/NOW()）动态推导区间，**禁止**把相对时间写成固定日期字面量（如 `'2026-09-01 00:00:00'`）。参考写法（MySQL，起点取当天 0 点、终点取截止日次日 0 点，左闭右开）：
+   - **通用公式：过去N天/近N天=含今天在内的最近N个自然日** → `时间列 >= DATE_SUB(CURDATE(), INTERVAL (N-1) DAY) AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`；即过去7天 → `时间列 >= DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`（终点必须是明天 0 点，**禁止**写成 `< CURDATE()`，否则漏掉今天全天数据）
+   - 近30天：`时间列 >= DATE_SUB(CURDATE(), INTERVAL 29 DAY) AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`
+   - 昨天：`时间列 >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND 时间列 < CURDATE()`
+   - 今天：`时间列 >= CURDATE() AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`
+   - 本月：`时间列 >= DATE_FORMAT(CURDATE(), '%Y-%m-01') AND 时间列 < DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 1 MONTH)`
+   仅当用户给出**明确具体日期**（如「9月1日到9月7日」「2026年8月」）时才使用用户指定的日期字面量
 4. 【相似示例】与【知识库参考】仅作口径参考，不得虚构不存在的表字段
 5. 若生成 SQL 涉及被权限限制的字段，忽略之（权限由系统自动注入）
 6. 若用户问题可对应多张语义相近的表（例如功能测试用例 test_cases 与接口测试用例 api_test_cases 都可能被问到「测试用例」），优先选择与问题最相关的一张表生成 SQL；若确实无法确定，选择注释最匹配的表，不要输出 clarify
@@ -120,8 +139,8 @@ LIMIT 分页参数;
     - 问「对比/比较/分别/各个」→ 按维度 GROUP BY，多维度时用多列分组
     - 问「最新/最近」→ ORDER BY 时间列 DESC + LIMIT 1
 11. 结果列必须有业务含义：禁止 SELECT *（除非用户明确要全部字段）；聚合查询只返回维度列 + 指标列；查询字段较多时 LIMIT 100
-12. 过滤条件优先走索引：时间范围用 时间列 BETWEEN ... AND ...；状态过滤用 状态列 = 值；避免对索引列用函数
-13. **单日/单月时间过滤必须用左闭右开区间**：查询"某天"数据用 `时间列 >= '2026-09-04 00:00:00' AND 时间列 < '2026-09-05 00:00:00'`；**禁止** `BETWEEN '2026-09-04' AND '2026-09-04'`（同日闭区间两端都是 0 点，会漏掉全天数据）；禁止 `= '2026-09-04'`（只匹配 0 点整）
+12. 过滤条件优先走索引：时间范围过滤用 `时间列 >= 起点 AND 时间列 < 终点`（左闭右开，可走索引），**禁止**用 `BETWEEN ... AND ...` 表示时间范围（闭区间含端点，与左闭右开口径冲突）；相对时间的起点/终点用 CURDATE()/NOW() + DATE_SUB/DATE_ADD 推导，日期函数放在常量侧，不要在时间列上套函数；状态过滤用 状态列 = 值
+13. **时间过滤必须用左闭右开区间**：查询"今天"用 `时间列 >= CURDATE() AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`；查询"昨天"用 `时间列 >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND 时间列 < CURDATE()`；查询指定日期"9月4日"用 `时间列 >= '2026-09-04 00:00:00' AND 时间列 < '2026-09-05 00:00:00'`；**禁止** `BETWEEN '2026-09-04' AND '2026-09-04'`（同日闭区间两端都是 0 点，会漏掉全天数据）；禁止 `= '2026-09-04'`（只匹配 0 点整）
 14. **子查询过滤必须用 IN**：按名称模糊匹配项目/实体再取其 ID 过滤时，禁止 `x = (SELECT id FROM ... WHERE name LIKE ...)`（可能返回多行报 1242），必须写 `x IN (SELECT id FROM ... WHERE name LIKE ...)`
 15. **禁止对 ID/外键类字段做聚合**：id、*_id 结尾字段（主键/外键，如 project_id、req_id、api_id）只用于关联、过滤、分组，**禁止** SUM/AVG/MAX/MIN(project_id) 这类无意义聚合；聚合函数只允许作用于数值业务指标（金额/数量/时长/次数/比率/大小等）。「按X项目」「查X项目/项目下的Y」是维度筛选（WHERE 项目名 LIKE + GROUP BY 项目名/名称列），不是对项目ID求和"""
 
@@ -1395,11 +1414,29 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
     if spec_context:
         import json as _json
         spec_data = spec_context.get("spec", {})
+        # 相对时间（近7天/昨天/本月等）：提示词中不展示解析出的绝对日期（start/end），
+        # 避免 LLM 照抄字面量；仅保留相对表达，配合下方【时间过滤】要求推导
+        _time = spec_data.get("time") or {}
+        _time_expr = str(_time.get("expr") or "").strip()
+        if _is_relative_time_expr(_time_expr) and _time.get("start"):
+            _spec_display = dict(spec_data)
+            _spec_display["time"] = {**_time, "start": "（由当前日期推导）", "end": "（由当前日期推导）"}
+            _spec_json = _json.dumps(_spec_display, ensure_ascii=False)
+        else:
+            _spec_json = _json.dumps(spec_data, ensure_ascii=False)
         spec_section = (
             "\n【已解析的查询参数（必须严格遵循，禁止偏离）】\n"
-            + _json.dumps(spec_data, ensure_ascii=False)
+            + _spec_json
             + "\n【字段映射结果（只能使用这些表和字段）】\n"
             + _json.dumps(spec_context.get("mapping", {}), ensure_ascii=False))
+        # 相对时间：强制参数化，禁止把解析出的绝对日期写成字面量
+        if _is_relative_time_expr(_time_expr):
+            spec_section += (
+                "\n【时间过滤（相对时间必须参数化）】\n"
+                f"- 用户时间表达「{_time_expr}」是相对时间，必须用数据库当前日期函数（CURDATE()/NOW() + DATE_SUB/DATE_ADD）动态推导区间，**禁止**把 start/end 中的具体日期写成固定字面量（如 '2026-09-01 00:00:00'）；\n"
+                "- 参考写法：过去N天/近N天=含今天在内的最近N个自然日 → `时间列 >= DATE_SUB(CURDATE(), INTERVAL (N-1) DAY) AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`（过去7天即 INTERVAL 6 DAY，终点为明天 0 点，**禁止**写成 `< CURDATE()` 否则漏掉今天）；昨天 → `时间列 >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND 时间列 < CURDATE()`；本月 → `时间列 >= DATE_FORMAT(CURDATE(), '%Y-%m-01') AND 时间列 < DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 1 MONTH)`；\n"
+                "- 区间左闭右开：起点取当天 0 点，终点取截止日次日 0 点；start/end 仅供核对口径（天数/月数），不得直接用作 SQL 字面量。"
+            )
         # 分箱维度（范围分布，如"文件大小范围"）：必须生成 CASE WHEN 直方图 SQL
         _buckets = [d for d in (spec_context.get("mapping") or {}).get("dimensions", [])
                     if d.get("bucket")]

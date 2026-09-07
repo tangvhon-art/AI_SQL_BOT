@@ -24,12 +24,12 @@ def safety_guardrails() -> str:
     return """## 系统硬性约束
 1. 仅允许 SELECT 查询，禁止 INSERT/UPDATE/DELETE/DDL/多语句、禁止注释注入
 2. 只能使用【可用表与字段】中列出的表与字段；WHERE / GROUP BY / HAVING / ORDER BY 引用的每一个字段，都必须能在【可用表与字段】的对应表名下找到；Schema 中不存在的字段一律禁止使用（例如某表没有 is_deleted 软删字段时，禁止写 `is_deleted = 0`，也不得想当然补充）；字段类型与注释见 Schema
-3. 涉及时间时使用数据库当前日期函数（如 CURDATE()/now()），不得使用固定日期
+3. **相对时间必须参数化，禁止固定日期**：用户问「过去N天/近N天/最近N天/昨天/今天/本周/本月」等相对时间时，必须基于数据库当前日期函数（CURDATE()/NOW()）动态推导区间，**禁止**把相对时间写成固定日期字面量（如 `'2026-09-01 00:00:00'`）。参考写法（MySQL，起点取当天 0 点、终点取截止日次日 0 点，左闭右开）：过去N天/近N天=含今天在内的最近N个自然日 → `时间列 >= DATE_SUB(CURDATE(), INTERVAL (N-1) DAY) AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`（过去7天 → INTERVAL 6 DAY，终点必须是明天 0 点，禁止写成 `< CURDATE()` 否则漏掉今天）；近30天 → `时间列 >= DATE_SUB(CURDATE(), INTERVAL 29 DAY) AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`；昨天 → `时间列 >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND 时间列 < CURDATE()`；今天 → `时间列 >= CURDATE() AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`；本月 → `时间列 >= DATE_FORMAT(CURDATE(), '%Y-%m-01') AND 时间列 < DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 1 MONTH)`。仅当用户给出明确具体日期（如「9月1日到9月7日」「2026年8月」）时才使用用户指定的日期字面量
 4. 【相似示例】与【知识库参考】仅作口径参考，不得虚构不存在的表字段
 5. 若生成 SQL 涉及被权限限制的字段，忽略之（权限由系统自动注入）
 6. **软删数据默认排除**：查询涉及的每张表只要存在 `is_deleted` 字段，就必须为其所属表追加 `is_deleted = 0` 条件（如 `tp.is_deleted = 0`，多表多个表级条件用 AND 连接），保证默认只统计未删除的数据；**仅当**用户明确要求查已删除/软删/回收站/全部（含删除）数据时才不加该条件
 7. 对名称、标题、项目名、用户名等模糊匹配条件，必须使用 LIKE '%关键词%'（如 WHERE name LIKE '%RT%'），禁止使用 = 精确匹配；仅当用户明确要求精确匹配（如「名称等于XX」「XX 精确」）时才用 =
-8. **单日/单月时间过滤必须用左闭右开区间**：查询"某天"数据用 `时间列 >= '2026-09-04 00:00:00' AND 时间列 < '2026-09-05 00:00:00'`；**禁止** `BETWEEN '2026-09-04' AND '2026-09-04'`（同日闭区间两端都是 0 点，会漏掉全天数据）；禁止 `= '2026-09-04'`（只匹配 0 点整）
+8. **时间过滤必须用左闭右开区间**：查询"今天"用 `时间列 >= CURDATE() AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`；查询"昨天"用 `时间列 >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND 时间列 < CURDATE()`；查询指定日期"9月4日"用 `时间列 >= '2026-09-04 00:00:00' AND 时间列 < '2026-09-05 00:00:00'`；**禁止** `BETWEEN '2026-09-04' AND '2026-09-04'`（同日闭区间两端都是 0 点，会漏掉全天数据）；禁止 `= '2026-09-04'`（只匹配 0 点整）
 9. **子查询过滤必须用 IN**：按名称模糊匹配项目/实体再取其 ID 过滤时，禁止 `x = (SELECT id FROM ... WHERE name LIKE ...)`（可能返回多行报 1242），必须写 `x IN (SELECT id FROM ... WHERE name LIKE ...)`
 10. **禁止对 ID/外键类字段做聚合**：id、*_id 结尾字段（主键/外键，如 project_id、req_id、api_id）只用于关联、过滤、分组，**禁止** SUM/AVG/MAX/MIN(project_id) 这类无意义聚合；聚合函数只允许作用于数值业务指标（金额/数量/时长/次数/比率/大小等）"""
 
