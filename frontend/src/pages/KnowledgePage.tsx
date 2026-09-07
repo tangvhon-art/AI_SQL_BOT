@@ -1,4 +1,5 @@
 // 知识库：FAQ + 文档（上传→切片→向量化）+ 检索测试台
+// 两个列表均支持查询条件 + 服务端分页（page/size）
 import { useState } from 'react'
 import {
   Button, Card, Drawer, Form, Input, Popconfirm, Space, Table, Tabs, Tag, Typography, Upload,
@@ -8,19 +9,67 @@ import type { UploadProps } from 'antd'
 import { client } from '../api/client'
 import type { Faq, KnowledgeDoc } from '../types'
 import PageHeader from '../components/PageHeader'
-import { useCrudList } from '../hooks/useCrudList'
+import QueryBar from '../components/QueryBar'
+import { GlassSelect } from '../ui'
+import { tablePagination, usePagedList } from '../hooks/useCrudList'
+
+const DOC_TYPE_OPTIONS = [
+  { label: 'txt', value: 'txt' },
+  { label: 'md', value: 'md' },
+  { label: 'markdown', value: 'markdown' },
+  { label: 'pdf', value: 'pdf' },
+  { label: 'docx', value: 'docx' },
+]
+const DOC_STATUS_OPTIONS = [
+  { label: '待处理', value: 'pending' },
+  { label: '解析中', value: 'parsing' },
+  { label: '已向量化', value: 'embedded' },
+  { label: '失败', value: 'failed' },
+]
 
 export default function KnowledgePage() {
-  const faqsHook = useCrudList<Faq>('/faqs')
-  const docsHook = useCrudList<KnowledgeDoc>('/documents')
-  const { data: faqs, load: loadFaqs, msgApi, toastError } = faqsHook
-  const { data: docs, load: loadDocs } = docsHook
+  const faqsHook = usePagedList<Faq>('/faqs')
+  const docsHook = usePagedList<KnowledgeDoc>('/documents')
+  const {
+    items: faqs, total: faqTotal, page: faqPage, size: faqSize, loading: faqLoading,
+    search: searchFaqs, reload: loadFaqs, onPageChange: faqPageChange, msgApi, toastError,
+  } = faqsHook
+  const {
+    items: docs, total: docTotal, page: docPage, size: docSize, loading: docLoading,
+    search: searchDocs, reload: loadDocs, onPageChange: docPageChange,
+  } = docsHook
   const [faqOpen, setFaqOpen] = useState(false)
   const [editing, setEditing] = useState<Faq | null>(null)
   const [form] = Form.useForm()
   const [retrieveQ, setRetrieveQ] = useState('')
   const [retrieveKind, setRetrieveKind] = useState<'doc' | 'faq'>('doc')
   const [retrieveHits, setRetrieveHits] = useState<Array<{ id: string; score: number; meta: Record<string, unknown>; content?: string }>>([])
+  // 查询条件
+  const [fFaqQ, setFaqQ] = useState('')
+  const [fFaqCategory, setFaqCategory] = useState('')
+  const [fFaqEnabled, setFaqEnabled] = useState<string>('')
+  const [fDocQ, setDocQ] = useState('')
+  const [fDocType, setDocType] = useState<string>('')
+  const [fDocStatus, setDocStatus] = useState<string>('')
+
+  const doSearchFaqs = () => searchFaqs({
+    q: fFaqQ.trim() || undefined,
+    category: fFaqCategory.trim() || undefined,
+    enabled: fFaqEnabled || undefined,
+  })
+  const doResetFaqs = () => {
+    setFaqQ(''); setFaqCategory(''); setFaqEnabled('')
+    searchFaqs({})
+  }
+  const doSearchDocs = () => searchDocs({
+    q: fDocQ.trim() || undefined,
+    file_type: fDocType || undefined,
+    status: fDocStatus || undefined,
+  })
+  const doResetDocs = () => {
+    setDocQ(''); setDocType(''); setDocStatus('')
+    searchDocs({})
+  }
 
   const openCreate = () => { setEditing(null); form.resetFields(); setFaqOpen(true) }
   const openEdit = (f: Faq) => { setEditing(f); form.setFieldsValue(f); setFaqOpen(true) }
@@ -74,16 +123,44 @@ export default function KnowledgePage() {
         items={[
           {
             key: 'faq',
-            label: `FAQ（${faqs.length}）`,
+            label: `FAQ（${faqTotal}）`,
             children: (
               <div>
-                <Button type="primary" icon={<PlusOutlined />} onClick={openCreate} style={{ marginBottom: 12 }}>
-                  新建 FAQ
-                </Button>
+                <Space style={{ marginBottom: 12 }}>
+                  <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+                    新建 FAQ
+                  </Button>
+                </Space>
+                <QueryBar onSearch={doSearchFaqs} onReset={doResetFaqs} loading={faqLoading}>
+                  <Input
+                    allowClear
+                    placeholder="问题关键字"
+                    style={{ width: 220 }}
+                    value={fFaqQ}
+                    onChange={(e) => setFaqQ(e.target.value)}
+                    onPressEnter={doSearchFaqs}
+                  />
+                  <Input
+                    allowClear
+                    placeholder="分类"
+                    style={{ width: 140 }}
+                    value={fFaqCategory}
+                    onChange={(e) => setFaqCategory(e.target.value)}
+                    onPressEnter={doSearchFaqs}
+                  />
+                  <GlassSelect
+                    allowClear
+                    placeholder="启用状态"
+                    style={{ width: 130 }}
+                    value={fFaqEnabled || undefined}
+                    onChange={(v) => setFaqEnabled(v ?? '')}
+                    options={[{ label: '启用', value: '1' }, { label: '停用', value: '0' }]}
+                  />
+                </QueryBar>
                 <Table
                   rowKey="id"
                   dataSource={faqs}
-                  pagination={{ pageSize: 10 }}
+                  pagination={tablePagination(faqPage, faqSize, faqTotal, faqPageChange)}
                   columns={[
                     { title: '问题', dataIndex: 'question' },
                     {
@@ -136,17 +213,44 @@ export default function KnowledgePage() {
           },
           {
             key: 'docs',
-            label: `文档（${docs.length}）`,
+            label: `文档（${docTotal}）`,
             children: (
               <div>
                 <Upload {...uploadProps}>
                   <Button type="primary" icon={<UploadOutlined />}>上传文档（txt/md/pdf/docx）</Button>
                 </Upload>
+                <div style={{ marginTop: 12 }}>
+                  <QueryBar onSearch={doSearchDocs} onReset={doResetDocs} loading={docLoading}>
+                    <Input
+                      allowClear
+                      placeholder="文档名关键字"
+                      style={{ width: 220 }}
+                      value={fDocQ}
+                      onChange={(e) => setDocQ(e.target.value)}
+                      onPressEnter={doSearchDocs}
+                    />
+                    <GlassSelect
+                      allowClear
+                      placeholder="文件类型"
+                      style={{ width: 130 }}
+                      value={fDocType || undefined}
+                      onChange={(v) => setDocType(v ?? '')}
+                      options={DOC_TYPE_OPTIONS}
+                    />
+                    <GlassSelect
+                      allowClear
+                      placeholder="状态"
+                      style={{ width: 140 }}
+                      value={fDocStatus || undefined}
+                      onChange={(v) => setDocStatus(v ?? '')}
+                      options={DOC_STATUS_OPTIONS}
+                    />
+                  </QueryBar>
+                </div>
                 <Table
-                  style={{ marginTop: 12 }}
                   rowKey="id"
                   dataSource={docs}
-                  pagination={false}
+                  pagination={tablePagination(docPage, docSize, docTotal, docPageChange)}
                   columns={[
                     { title: '文档', dataIndex: 'name' },
                     { title: '类型', dataIndex: 'file_type', render: (v) => <Tag>{v}</Tag> },

@@ -1,4 +1,4 @@
-// 模型配置：OpenAI 兼容 LLM/Embedding
+// 模型配置：查询条件（名称/模型名/场景）+ 服务端分页 + OpenAI 兼容 LLM/Embedding
 import { useState } from 'react'
 import {
  Button, Card, Drawer, Form, Input, InputNumber, Popconfirm, Space, Switch, Table, Tag,
@@ -7,14 +7,25 @@ import { PlusOutlined } from '@ant-design/icons'
 import { client } from '../api/client'
 import type { ModelItem } from '../types'
 import PageHeader from '../components/PageHeader'
+import QueryBar from '../components/QueryBar'
 import { GlassSelect } from '../ui'
-import { useCrudList } from '../hooks/useCrudList'
+import { tablePagination, usePagedList } from '../hooks/useCrudList'
 
 export default function ModelPage() {
-  const { data: list, load, msgApi, ctx, toastError } = useCrudList<ModelItem>('/models')
+  const list = usePagedList<ModelItem>('/models')
+  const { items, total, page, size, loading, search, reload, onPageChange, msgApi, ctx, toastError } = list
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<ModelItem | null>(null)
   const [form] = Form.useForm()
+  // 查询条件
+  const [fKeyword, setFKeyword] = useState('')
+  const [fScene, setFScene] = useState<string>('')
+
+  const doSearch = () => search({
+    keyword: fKeyword.trim() || undefined,
+    scene: fScene || undefined,
+  })
+  const doReset = () => { setFKeyword(''); setFScene(''); search({}) }
 
   const openCreate = () => { setEditing(null); form.resetFields(); setOpen(true) }
   const openEdit = (m: ModelItem) => { setEditing(m); form.setFieldsValue(m); setOpen(true) }
@@ -26,7 +37,7 @@ export default function ModelPage() {
       else await client.post('/models', v)
       msgApi.success('已保存')
       setOpen(false)
-      load()
+      reload()
     } catch (e) { toastError(e) }
   }
 
@@ -46,10 +57,28 @@ export default function ModelPage() {
       />
       <Card styles={{ header: { display: 'none' } }}>
       {ctx}
+      <QueryBar onSearch={doSearch} onReset={doReset} loading={loading}>
+        <Input
+          allowClear
+          placeholder="名称 / 模型名"
+          style={{ width: 200 }}
+          value={fKeyword}
+          onChange={(e) => setFKeyword(e.target.value)}
+          onPressEnter={doSearch}
+        />
+        <GlassSelect
+          allowClear
+          placeholder="场景"
+          style={{ width: 140 }}
+          value={fScene || undefined}
+          onChange={(v) => setFScene(v ?? '')}
+          options={[{ label: 'SQL 生成', value: 'sql' }, { label: '文字总结', value: 'summary' }]}
+        />
+      </QueryBar>
       <Table
         rowKey="id"
-        dataSource={list}
-        pagination={false}
+        dataSource={items}
+        pagination={tablePagination(page, size, total, onPageChange)}
         columns={[
           { title: '名称', dataIndex: 'name' },
           { title: '模型', dataIndex: 'model_name', render: (v, r) => <code>{v}</code> },
@@ -64,7 +93,7 @@ export default function ModelPage() {
                 <Button size="small" onClick={() => test(r)}>测试</Button>
                 <Button size="small" onClick={() => openEdit(r)}>编辑</Button>
                 <Popconfirm title="删除该模型配置？" onConfirm={async () => {
-                  await client.delete(`/models/${r.id}`); load()
+                  await client.delete(`/models/${r.id}`); reload()
                 }}>
                   <Button size="small" danger>删除</Button>
                 </Popconfirm>

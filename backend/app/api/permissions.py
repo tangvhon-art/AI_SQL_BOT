@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..engine.permission import compute_permissions
 from ..models import ColumnMeta, Datasource, PermissionRule, Role, TableMeta, User
-from .common import get_or_404, workspace_scope
+from .common import get_or_404, paginate, workspace_scope
 from .deps import get_current_user
 
 router = APIRouter(prefix="/permission-rules", tags=["permissions"])
@@ -38,10 +38,28 @@ def _col_names(db: Session, table_id: int, col_ids: list[int]) -> list[str]:
 
 
 @router.get("")
-def list_rules(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    rules = workspace_scope(db, PermissionRule, user).all()
+def list_rules(scope_type: str = "", rule_type: str = "", datasource_id: int | None = None,
+               table: str = "", enabled: str = "", page: int = 1, size: int = 20,
+               db: Session = Depends(get_db), user=Depends(get_current_user)):
+    query = workspace_scope(db, PermissionRule, user)
+    if scope_type:
+        query = query.filter(PermissionRule.scope_type == scope_type)
+    if rule_type:
+        query = query.filter(PermissionRule.rule_type == rule_type)
+    if datasource_id:
+        query = query.filter(PermissionRule.datasource_id == datasource_id)
+    if table:
+        table_ids = [t.id for t in db.query(TableMeta)
+                     .filter(TableMeta.table_name.like(f"%{table}%")).all()]
+        if not table_ids:
+            return {"total": 0, "items": []}
+        query = query.filter(PermissionRule.table_id.in_(table_ids))
+    if enabled in ("1", "0"):
+        query = query.filter(PermissionRule.enabled.is_(enabled == "1"))
+    query = query.order_by(PermissionRule.id.desc())
+    rows, total = paginate(query, page, size)
     out = []
-    for r in rules:
+    for r in rows:
         item = _out(r)
         tm = db.query(TableMeta).get(r.table_id)
         ds = db.query(Datasource).get(r.datasource_id)
@@ -49,7 +67,7 @@ def list_rules(db: Session = Depends(get_db), user=Depends(get_current_user)):
         item["column_names"] = _col_names(db, r.table_id, r.column_ids or [])
         item["datasource_name"] = ds.name if ds else ""
         out.append(item)
-    return out
+    return {"total": total, "items": out}
 
 
 @router.post("")

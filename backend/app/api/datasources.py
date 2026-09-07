@@ -8,7 +8,8 @@ from ..database import get_db
 from ..models import ColumnMeta, Datasource, Relationship, TableMeta
 from ..security import aes_encrypt
 from ..services.datasource_service import sync_schema, test_connection
-from .common import apply_fields, get_or_404, get_owned_or_404, soft_delete, workspace_scope
+from .common import (apply_fields, get_or_404, get_owned_or_404, paginate,
+                     soft_delete, workspace_scope)
 from .deps import get_current_user
 
 router = APIRouter(prefix="/datasources", tags=["datasources"])
@@ -41,8 +42,19 @@ def _out(ds: Datasource) -> dict:
 
 
 @router.get("")
-def list_datasources(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    return [_out(ds) for ds in workspace_scope(db, Datasource, user).all()]
+def list_datasources(keyword: str = "", type: str = "", status: str = "",
+                     page: int = 1, size: int = 20,
+                     db: Session = Depends(get_db), user=Depends(get_current_user)):
+    query = workspace_scope(db, Datasource, user)
+    if keyword:
+        query = query.filter(Datasource.name.like(f"%{keyword}%"))
+    if type:
+        query = query.filter(Datasource.type == type)
+    if status:
+        query = query.filter(Datasource.status == status)
+    query = query.order_by(Datasource.id.desc())
+    rows, total = paginate(query, page, size)
+    return {"total": total, "items": [_out(ds) for ds in rows]}
 
 
 @router.post("")

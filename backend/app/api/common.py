@@ -56,3 +56,15 @@ def soft_delete(db: Session, obj, *related_queries: Query) -> None:
 def workspace_scope(db: Session, model, user, workspace_field: str = "workspace_id"):
     """返回按当前用户工作空间过滤后的查询对象（可继续链式 filter/order_by）。"""
     return db.query(model).filter(getattr(model, workspace_field) == getattr(user, workspace_field))
+
+
+def paginate(query: Query, page: int = 1, size: int = 20, max_size: int = 200):
+    """对查询对象执行分页（页面公共化：page 从 1 开始，size 上限截断）。
+
+    返回 (rows, total)；传入前建议先完成 filter/order_by 链式调用。
+    """
+    page = max(1, int(page))
+    size = min(max(1, int(size)), max_size)
+    total = query.count()
+    rows = query.offset((page - 1) * size).limit(size).all()
+    return rows, total

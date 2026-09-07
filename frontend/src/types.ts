@@ -1,4 +1,11 @@
 // 前端类型定义（与后端 API 契约对齐）
+
+/** 后端分页列表统一返回结构（页面公共化：page/size + total/items） */
+export interface PageResult<T> {
+  total: number
+  items: T[]
+}
+
 export interface UserInfo {
   id: number
   username: string

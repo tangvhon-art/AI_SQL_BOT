@@ -1,5 +1,5 @@
-// 保存查询 + 定时任务：参数化编辑、cron 快捷模板、立即执行、运行历史（图表快照）
-import { useState } from 'react'
+// 保存查询 + 定时任务：查询条件 + 服务端分页、参数化编辑、cron 快捷模板、立即执行、运行历史（图表快照）
+import { useEffect, useState } from 'react'
 import {
  Button, Card, Drawer, Form, Input, Popconfirm, Space, Table, Tabs, Tag, Timeline,
 } from 'antd'
@@ -8,8 +8,9 @@ import { client } from '../api/client'
 import type { SavedQuery, ScheduledTask } from '../types'
 import ChartCard from '../components/ChartCard'
 import PageHeader from '../components/PageHeader'
+import QueryBar from '../components/QueryBar'
 import { GlassSelect } from '../ui'
-import { useCrudList } from '../hooks/useCrudList'
+import { tablePagination, usePagedList } from '../hooks/useCrudList'
 
 const CRON_OPTIONS = [
   { label: '每天 09:00', value: 'daily 09:00' },
@@ -20,11 +21,23 @@ const CRON_OPTIONS = [
 ]
 
 export default function SavedQueryPage() {
-  const sqHook = useCrudList<SavedQuery>('/saved-queries')
-  const taskHook = useCrudList<ScheduledTask>('/scheduled-tasks')
-  const { data: sqs, load: loadSqs, msgApi, toastError } = sqHook
-  const { data: tasks, load: loadTasks } = taskHook
+  const sqHook = usePagedList<SavedQuery>('/saved-queries')
+  const taskHook = usePagedList<ScheduledTask>('/scheduled-tasks')
+  const {
+    items: sqs, total: sqTotal, page: sqPage, size: sqSize, loading: sqLoading,
+    search: searchSqs, reload: loadSqs, onPageChange: sqPageChange, msgApi, toastError,
+  } = sqHook
+  const {
+    items: tasks, total: taskTotal, page: taskPage, size: taskSize, loading: taskLoading,
+    search: searchTasks, reload: loadTasks, onPageChange: taskPageChange,
+  } = taskHook
   const reload = () => { loadSqs(); loadTasks() }
+  const [sqOptions, setSqOptions] = useState<Array<{ label: string; value: number }>>([])
+  const loadSqOptions = () => {
+    client.get<{ total: number; items: SavedQuery[] }>('/saved-queries', { params: { page: 1, size: 200 } })
+      .then((r) => setSqOptions(r.data.items.map((s) => ({ label: s.name, value: s.id }))))
+      .catch(() => {})
+  }
   const [sqOpen, setSqOpen] = useState(false)
   const [editingSq, setEditingSq] = useState<SavedQuery | null>(null)
   const [sqForm] = Form.useForm()
@@ -33,6 +46,20 @@ export default function SavedQueryPage() {
   const [taskForm] = Form.useForm()
   const [runs, setRuns] = useState<Array<{ id: number; run_time?: string; status: string; param_values: Record<string, unknown>; row_count: number; latency_ms?: number; error_msg: string; chart_snapshot: Record<string, unknown> }>>([])
   const [runsOpen, setRunsOpen] = useState(false)
+  // 查询条件
+  const [fSqKeyword, setSqKeyword] = useState('')
+  const [fTaskKeyword, setTaskKeyword] = useState('')
+  const [fTaskStatus, setTaskStatus] = useState<string>('')
+
+  const doSearchSqs = () => searchSqs({ keyword: fSqKeyword.trim() || undefined })
+  const doResetSqs = () => { setSqKeyword(''); searchSqs({}) }
+  const doSearchTasks = () => searchTasks({
+    keyword: fTaskKeyword.trim() || undefined,
+    status: fTaskStatus || undefined,
+  })
+  const doResetTasks = () => { setTaskKeyword(''); setTaskStatus(''); searchTasks({}) }
+
+  useEffect(() => { loadSqOptions() }, [])
 
   const openCreateSq = () => { setEditingSq(null); sqForm.resetFields(); setSqOpen(true) }
   const openEditSq = (sq: SavedQuery) => {
@@ -61,6 +88,7 @@ export default function SavedQueryPage() {
       msgApi.success('已保存')
       setSqOpen(false)
       reload()
+      loadSqOptions()
     } catch (e) { toastError(e) }
   }
 
@@ -118,16 +146,26 @@ export default function SavedQueryPage() {
         items={[
           {
             key: 'sq',
-            label: `保存查询（${sqs.length}）`,
+            label: `保存查询（${sqTotal}）`,
             children: (
               <div>
                 <Button type="primary" icon={<PlusOutlined />} onClick={openCreateSq} style={{ marginBottom: 12 }}>
                   新建保存查询
                 </Button>
+                <QueryBar onSearch={doSearchSqs} onReset={doResetSqs} loading={sqLoading}>
+                  <Input
+                    allowClear
+                    placeholder="名称 / 标签关键字"
+                    style={{ width: 220 }}
+                    value={fSqKeyword}
+                    onChange={(e) => setSqKeyword(e.target.value)}
+                    onPressEnter={doSearchSqs}
+                  />
+                </QueryBar>
                 <Table
                   rowKey="id"
                   dataSource={sqs}
-                  pagination={false}
+                  pagination={tablePagination(sqPage, sqSize, sqTotal, sqPageChange)}
                   columns={[
                     { title: '名称', dataIndex: 'name' },
                     { title: 'SQL', dataIndex: 'sql_text', render: (v: string) => <code style={{ fontSize: 12 }}>{v.slice(0, 80)}{v.length > 80 ? '…' : ''}</code> },
@@ -138,7 +176,7 @@ export default function SavedQueryPage() {
                       render: (_, r) => (
                         <Space size={4}>
                           <Button size="small" onClick={() => openEditSq(r)}>编辑</Button>
-                          <Popconfirm title="删除？" onConfirm={async () => { await client.delete(`/saved-queries/${r.id}`); reload() }}>
+                          <Popconfirm title="删除？" onConfirm={async () => { await client.delete(`/saved-queries/${r.id}`); reload(); loadSqOptions() }}>
                             <Button size="small" danger>删除</Button>
                           </Popconfirm>
                         </Space>
@@ -178,16 +216,34 @@ export default function SavedQueryPage() {
           },
           {
             key: 'task',
-            label: `定时任务（${tasks.length}）`,
+            label: `定时任务（${taskTotal}）`,
             children: (
               <div>
                 <Button type="primary" icon={<PlusOutlined />} onClick={openCreateTask} style={{ marginBottom: 12 }}>
                   新建定时任务
                 </Button>
+                <QueryBar onSearch={doSearchTasks} onReset={doResetTasks} loading={taskLoading}>
+                  <Input
+                    allowClear
+                    placeholder="任务名关键字"
+                    style={{ width: 200 }}
+                    value={fTaskKeyword}
+                    onChange={(e) => setTaskKeyword(e.target.value)}
+                    onPressEnter={doSearchTasks}
+                  />
+                  <GlassSelect
+                    allowClear
+                    placeholder="状态"
+                    style={{ width: 130 }}
+                    value={fTaskStatus || undefined}
+                    onChange={(v) => setTaskStatus(v ?? '')}
+                    options={[{ label: '启用', value: 'enabled' }, { label: '停用', value: 'disabled' }]}
+                  />
+                </QueryBar>
                 <Table
                   rowKey="id"
                   dataSource={tasks}
-                  pagination={false}
+                  pagination={tablePagination(taskPage, taskSize, taskTotal, taskPageChange)}
                   columns={[
                     { title: '任务名', dataIndex: 'name' },
                     { title: '关联查询', dataIndex: 'saved_query_name' },
@@ -216,7 +272,7 @@ export default function SavedQueryPage() {
                   <Form form={taskForm} layout="vertical" initialValues={{ status: 'enabled', timezone: 'Asia/Shanghai', cron_expr: 'daily 09:00' }}>
                     <Form.Item name="name" label="任务名" rules={[{ required: true }]}><Input /></Form.Item>
                     <Form.Item name="saved_query_id" label="关联保存查询" rules={[{ required: true }]}>
-                      <GlassSelect options={sqs.map((s) => ({ label: s.name, value: s.id }))} />
+                      <GlassSelect options={sqOptions} />
                     </Form.Item>
                     <Form.Item name="cron_expr" label="cron 表达式" rules={[{ required: true }]}>
                       <GlassSelect options={CRON_OPTIONS} showSearch allowClear placeholder="或自定义：daily 08:00 / hourly / interval 3600" />

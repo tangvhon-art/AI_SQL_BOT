@@ -156,11 +156,14 @@ export default function ChatPage() {
 
   useEffect(() => {
     loadConversations()
-    client.get<Datasource[]>('/datasources').then((r) => setDsList(r.data)).catch(() => {})
+    // 数据源/模型列表接口已分页化（返回 {total, items}），此处兼容取 items；选项按 size 上限拉取
+    client.get<Datasource[] | { total: number; items: Datasource[] }>('/datasources', { params: { page: 1, size: 200 } })
+      .then((r) => setDsList(Array.isArray(r.data) ? r.data : r.data.items))
+      .catch(() => {})
     // 加载可用大模型（sql 场景），默认选中 is_default
-    client.get<Array<{ id: number; name: string; model_name: string; is_default: boolean; scene: string }>>('/models')
+    client.get<Array<{ id: number; name: string; model_name: string; is_default: boolean; scene: string }> | { total: number; items: Array<{ id: number; name: string; model_name: string; is_default: boolean; scene: string }> }>('/models', { params: { page: 1, size: 200 } })
       .then((r) => {
-        const sqlModels = (r.data || []).filter((m) => !m.scene || m.scene === 'sql')
+        const sqlModels = (Array.isArray(r.data) ? r.data : r.data.items).filter((m) => !m.scene || m.scene === 'sql')
         setModelList(sqlModels)
         const def = sqlModels.find((m) => m.is_default) || sqlModels[0]
         if (def) setModelId(def.id)

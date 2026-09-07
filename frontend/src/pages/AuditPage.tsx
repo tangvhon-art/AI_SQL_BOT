@@ -1,21 +1,28 @@
-// 审计日志：问数全链路留痕（含权限注入类型）
-import { useEffect, useState } from 'react'
-import { Button, Card, Input, Space, Table, Tag } from 'antd'
-import { SearchOutlined } from '@ant-design/icons'
+// 审计日志：查询条件（问题/意图/权限注入）+ 服务端分页（page/size）；问数全链路留痕（含权限注入类型）
+import { useState } from 'react'
+import { Card, Input, Table, Tag } from 'antd'
 import type { QueryLog } from '../types'
 import PageHeader from '../components/PageHeader'
+import QueryBar from '../components/QueryBar'
 import { GlassSelect } from '../ui'
-import { useCrudList } from '../hooks/useCrudList'
+import { tablePagination, usePagedList } from '../hooks/useCrudList'
 
 export default function AuditPage() {
-  const { data: list, load, ctx } = useCrudList<QueryLog>('', false, { silent: true })
+  const list = usePagedList<QueryLog>('/query-logs', { silent: true })
+  const { items, total, page, size, loading, search, onPageChange, ctx } = list
   const [question, setQuestion] = useState('')
-  const [injected, setInjected] = useState<string>('')
+  const [intent, setIntent] = useState('')
+  const [injected, setInjected] = useState('')
 
-  const doQuery = () => load('/query-logs', {
-    params: { question: question || undefined, injected: injected || undefined, limit: 100 },
+  const doQuery = () => search({
+    question: question.trim() || undefined,
+    intent: intent || undefined,
+    injected: injected || undefined,
   })
-  useEffect(() => { doQuery() }, [])
+  const doReset = () => {
+    setQuestion(''); setIntent(''); setInjected('')
+    search({})
+  }
 
   return (
     <div className="glass-page">
@@ -24,8 +31,24 @@ export default function AuditPage() {
         description="问数全链路留痕：问题、命中表、生成 SQL、权限注入类型（1=1 / 1=2）、行数、耗时与反馈"
       />
       <Card styles={{ header: { display: 'none' } }}>
-      <Space style={{ marginBottom: 12 }}>
-        <Input placeholder="按问题搜索" value={question} onChange={(e) => setQuestion(e.target.value)} style={{ width: 220 }} />
+      {ctx}
+      <QueryBar onSearch={doQuery} onReset={doReset} loading={loading}>
+        <Input placeholder="按问题搜索" allowClear value={question} onChange={(e) => setQuestion(e.target.value)} style={{ width: 220 }} onPressEnter={doQuery} />
+        <GlassSelect
+          placeholder="意图"
+          allowClear
+          value={intent || undefined}
+          onChange={setIntent}
+          style={{ width: 130 }}
+          options={[
+            { label: 'value', value: 'value' },
+            { label: 'compare', value: 'compare' },
+            { label: 'ranking', value: 'ranking' },
+            { label: 'trend', value: 'trend' },
+            { label: 'detail', value: 'detail' },
+            { label: 'statistic', value: 'statistic' },
+          ]}
+        />
         <GlassSelect
           placeholder="权限注入"
           value={injected || undefined}
@@ -34,12 +57,11 @@ export default function AuditPage() {
           style={{ width: 140 }}
           options={[{ label: '1=1（全可查）', value: '1=1' }, { label: '1=2（含受限字段）', value: '1=2' }]}
         />
-        <Button type="primary" icon={<SearchOutlined />} onClick={doQuery}>查询</Button>
-      </Space>
+      </QueryBar>
       <Table
         rowKey="id"
-        dataSource={list}
-        pagination={{ pageSize: 20 }}
+        dataSource={items}
+        pagination={tablePagination(page, size, total, onPageChange)}
         size="small"
         columns={[
           { title: '时间', dataIndex: 'create_time', render: (v) => (v ? new Date(v).toLocaleString() : '—'), width: 160 },

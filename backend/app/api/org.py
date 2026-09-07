@@ -3,13 +3,14 @@
 删除语义：全部为逻辑删除（is_deleted=1），查询侧由全局软删过滤自动排除。"""
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..database import get_db, soft_delete_all
 from ..models import (Menu, Role, RoleMenu, RoleUser, RoleUserGroup,
                       User, UserGroup, UserGroupMember)
 from ..security import hash_password
-from .common import get_or_404, workspace_scope
+from .common import get_or_404, paginate, workspace_scope
 from .deps import get_current_user
 
 router = APIRouter(tags=["org"])
@@ -96,17 +97,23 @@ class IdsIn(BaseModel):
 
 
 @router.get("/roles")
-def list_roles(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    roles = db.query(Role).order_by(Role.id).all()
+def list_roles(keyword: str = "", page: int = 1, size: int = 20,
+               db: Session = Depends(get_db), user=Depends(get_current_user)):
+    query = db.query(Role)
+    if keyword:
+        query = query.filter(or_(Role.code.like(f"%{keyword}%"),
+                                 Role.name.like(f"%{keyword}%")))
+    query = query.order_by(Role.id)
+    rows, total = paginate(query, page, size)
     out = []
-    for r in roles:
+    for r in rows:
         item = _role_out(r)
         item["users"] = [u.id for u in db.query(User).filter(User.role_id == r.id).all()]
         item["user_ids"] = [ru.user_id for ru in db.query(RoleUser).filter(RoleUser.role_id == r.id).all()]
         item["group_ids"] = [rg.group_id for rg in db.query(RoleUserGroup).filter(RoleUserGroup.role_id == r.id).all()]
         item["menu_ids"] = [rm.menu_id for rm in db.query(RoleMenu).filter(RoleMenu.role_id == r.id).all()]
         out.append(item)
-    return out
+    return {"total": total, "items": out}
 
 
 @router.post("/roles")
@@ -182,17 +189,23 @@ class GroupIn(BaseModel):
 
 
 @router.get("/user-groups")
-def list_groups(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    groups = workspace_scope(db, UserGroup, user).all()
+def list_groups(keyword: str = "", page: int = 1, size: int = 20,
+                db: Session = Depends(get_db), user=Depends(get_current_user)):
+    query = workspace_scope(db, UserGroup, user)
+    if keyword:
+        query = query.filter(or_(UserGroup.name.like(f"%{keyword}%"),
+                                 UserGroup.remark.like(f"%{keyword}%")))
+    query = query.order_by(UserGroup.id)
+    rows, total = paginate(query, page, size)
     out = []
-    for g in groups:
+    for g in rows:
         item = _group_out(g)
         item["member_ids"] = [m.user_id for m in
                               db.query(UserGroupMember).filter(UserGroupMember.group_id == g.id).all()]
         item["role_ids"] = [rg.role_id for rg in
                             db.query(RoleUserGroup).filter(RoleUserGroup.group_id == g.id).all()]
         out.append(item)
-    return out
+    return {"total": total, "items": out}
 
 
 @router.post("/user-groups")
@@ -245,10 +258,23 @@ class UserIn(BaseModel):
 
 
 @router.get("/users")
-def list_users(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    users = workspace_scope(db, User, user).all()
+def list_users(keyword: str = "", status: int | None = None, role_id: int | None = None,
+               page: int = 1, size: int = 20,
+               db: Session = Depends(get_db), user=Depends(get_current_user)):
+    query = workspace_scope(db, User, user)
+    if keyword:
+        query = query.filter(or_(User.username.like(f"%{keyword}%"),
+                                 User.display_name.like(f"%{keyword}%")))
+    if status is not None:
+        query = query.filter(User.status == status)
+    if role_id:
+        # 主角色或直接分配的角色包含该角色的用户都命中
+        direct_ids = db.query(RoleUser.user_id).filter(RoleUser.role_id == role_id)
+        query = query.filter(or_(User.role_id == role_id, User.id.in_(direct_ids)))
+    query = query.order_by(User.id)
+    rows, total = paginate(query, page, size)
     out = []
-    for u in users:
+    for u in rows:
         item = _user_out(u)
         role = db.query(Role).get(u.role_id) if u.role_id else None
         item["role_code"] = role.code if role else ""
@@ -258,7 +284,7 @@ def list_users(db: Session = Depends(get_db), user=Depends(get_current_user)):
         item["group_names"] = [g.name for g in
                                db.query(UserGroup).filter(UserGroup.id.in_(item["group_ids"])).all()] if item["group_ids"] else []
         out.append(item)
-    return out
+    return {"total": total, "items": out}
 
 
 @router.post("/users")

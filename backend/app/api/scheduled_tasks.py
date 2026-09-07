@@ -1,12 +1,13 @@
 """保存查询与定时任务：CRUD / 手动执行 / 运行历史。"""
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..engine.scheduler import parse_cron, run_task
 from ..models import SavedQuery, ScheduledTask, TaskRunLog
-from .common import get_or_404, soft_delete, workspace_scope
+from .common import get_or_404, paginate, soft_delete, workspace_scope
 from .deps import get_current_user
 
 router = APIRouter(tags=["saved"])
@@ -29,9 +30,15 @@ def _sq_out(sq: SavedQuery) -> dict:
 
 
 @router.get("/saved-queries")
-def list_saved(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    rows = workspace_scope(db, SavedQuery, user).order_by(SavedQuery.id.desc()).all()
-    return [_sq_out(sq) for sq in rows]
+def list_saved(keyword: str = "", page: int = 1, size: int = 20,
+               db: Session = Depends(get_db), user=Depends(get_current_user)):
+    query = workspace_scope(db, SavedQuery, user)
+    if keyword:
+        query = query.filter(or_(SavedQuery.name.like(f"%{keyword}%"),
+                                 SavedQuery.tags.like(f"%{keyword}%")))
+    query = query.order_by(SavedQuery.id.desc())
+    rows, total = paginate(query, page, size)
+    return {"total": total, "items": [_sq_out(sq) for sq in rows]}
 
 
 @router.post("/saved-queries")
@@ -91,18 +98,24 @@ def _task_out(t: ScheduledTask) -> dict:
 
 
 @router.get("/scheduled-tasks")
-def list_tasks(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    rows = (db.query(ScheduledTask)
-            .filter(ScheduledTask.saved_query_id.in_(
-                db.query(SavedQuery.id).filter(SavedQuery.workspace_id == user.workspace_id)))
-            .order_by(ScheduledTask.id.desc()).all())
+def list_tasks(keyword: str = "", status: str = "", page: int = 1, size: int = 20,
+               db: Session = Depends(get_db), user=Depends(get_current_user)):
+    query = (db.query(ScheduledTask)
+             .filter(ScheduledTask.saved_query_id.in_(
+                 db.query(SavedQuery.id).filter(SavedQuery.workspace_id == user.workspace_id))))
+    if keyword:
+        query = query.filter(ScheduledTask.name.like(f"%{keyword}%"))
+    if status:
+        query = query.filter(ScheduledTask.status == status)
+    query = query.order_by(ScheduledTask.id.desc())
+    rows, total = paginate(query, page, size)
     out = []
     for t in rows:
         item = _task_out(t)
         sq = db.query(SavedQuery).get(t.saved_query_id)
         item["saved_query_name"] = sq.name if sq else ""
         out.append(item)
-    return out
+    return {"total": total, "items": out}
 
 
 @router.post("/scheduled-tasks")

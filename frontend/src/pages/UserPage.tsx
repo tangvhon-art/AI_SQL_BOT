@@ -1,4 +1,4 @@
-// 用户管理：用户 CRUD + 分配角色 / 分配用户组（用户被分配的用户组或角色，两者取并集）
+// 用户管理：查询条件（关键字/状态/角色）+ 服务端分页 + 用户 CRUD + 分配角色 / 分配用户组（用户被分配的用户组或角色，两者取并集）
 import { useState } from 'react'
 import {
   Card, Drawer, Form, Input, Popconfirm, Space, Switch, Table, Tag,
@@ -6,8 +6,9 @@ import {
 import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons'
 import { client } from '../api/client'
 import PageHeader from '../components/PageHeader'
+import QueryBar from '../components/QueryBar'
 import { DefaultButton, GlassSelect, PrimaryButton, TabSwitch } from '../ui'
-import { useCrudList } from '../hooks/useCrudList'
+import { tablePagination, usePagedList } from '../hooks/useCrudList'
 import { useOptions } from '../hooks/useOptions'
 
 interface UserRow {
@@ -26,7 +27,8 @@ interface RoleRow { id: number; name: string }
 interface GroupRow { id: number; name: string }
 
 export default function UserPage() {
-  const { data: users, load: loadUsers, msgApi, ctx, toastError } = useCrudList<UserRow>('/users')
+  const list = usePagedList<UserRow>('/users')
+  const { items: users, total, page, size, loading, search, reload: loadUsers, msgApi, ctx, toastError } = list
   const roles = useOptions<RoleRow>('roles')
   const groups = useOptions<GroupRow>('user-groups')
   const [open, setOpen] = useState(false)
@@ -35,6 +37,20 @@ export default function UserPage() {
   const [assignTab, setAssignTab] = useState<'roles' | 'groups'>('roles')
   const [assignIds, setAssignIds] = useState<number[]>([])
   const [form] = Form.useForm()
+  // 查询条件
+  const [fKeyword, setFKeyword] = useState('')
+  const [fStatus, setFStatus] = useState<string>('')
+  const [fRoleId, setFRoleId] = useState<number | undefined>()
+
+  const doSearch = () => search({
+    keyword: fKeyword.trim() || undefined,
+    status: fStatus || undefined,
+    role_id: fRoleId,
+  })
+  const doReset = () => {
+    setFKeyword(''); setFStatus(''); setFRoleId(undefined)
+    search({})
+  }
 
   const openCreate = () => {
     setEditing(null)
@@ -84,13 +100,41 @@ export default function UserPage() {
       {ctx}
       <PageHeader title="用户管理" description="用户可被直接分配角色，也可加入用户组继承组角色；两者权限取并集" />
       <Card className="glass-card" variant="borderless">
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, gap: 12, flexWrap: 'wrap' }}>
+          <QueryBar onSearch={doSearch} onReset={doReset} loading={loading}>
+            <Input
+              allowClear
+              placeholder="用户名 / 显示名"
+              style={{ width: 200 }}
+              value={fKeyword}
+              onChange={(e) => setFKeyword(e.target.value)}
+              onPressEnter={doSearch}
+            />
+            <GlassSelect
+              allowClear
+              placeholder="状态"
+              style={{ width: 110 }}
+              value={fStatus || undefined}
+              onChange={(v) => setFStatus(v ?? '')}
+              options={[{ label: '启用', value: '1' }, { label: '停用', value: '0' }]}
+            />
+            <GlassSelect
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="角色"
+              style={{ width: 160 }}
+              value={fRoleId}
+              onChange={(v) => setFRoleId(v)}
+              options={roles.map((r) => ({ label: r.name, value: r.id }))}
+            />
+          </QueryBar>
           <PrimaryButton icon={<PlusOutlined />} onClick={openCreate}>新建用户</PrimaryButton>
         </div>
         <Table<UserRow>
           rowKey="id"
           dataSource={users}
-          pagination={false}
+          pagination={tablePagination(page, size, total, list.onPageChange)}
           columns={[
             { title: 'ID', dataIndex: 'id', width: 60 },
             { title: '用户名', dataIndex: 'username' },

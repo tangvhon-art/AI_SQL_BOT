@@ -1,4 +1,4 @@
-// 角色管理：角色 CRUD + 分配用户 / 分配用户组 / 分配菜单（权限口径：用户角色∪用户组角色）
+// 角色管理：查询条件（编码/名称）+ 服务端分页 + 角色 CRUD + 分配用户 / 分配用户组 / 分配菜单（权限口径：用户角色∪用户组角色）
 import { useMemo, useState } from 'react'
 import {
   Card, Drawer, Form, Input, Popconfirm, Space, Table, Tag, Tree,
@@ -7,8 +7,9 @@ import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons'
 import { client } from '../api/client'
 import type { MenuItem } from '../types'
 import PageHeader from '../components/PageHeader'
+import QueryBar from '../components/QueryBar'
 import { DefaultButton, GlassSelect, PrimaryButton, TabSwitch } from '../ui'
-import { useCrudList } from '../hooks/useCrudList'
+import { tablePagination, usePagedList } from '../hooks/useCrudList'
 import { useOptions } from '../hooks/useOptions'
 
 interface RoleRow {
@@ -24,7 +25,8 @@ interface UserRow { id: number; username: string; display_name: string }
 interface GroupRow { id: number; name: string }
 
 export default function RolePage() {
-  const { data: roles, load: loadRoles, msgApi, ctx, toastError } = useCrudList<RoleRow>('/roles')
+  const list = usePagedList<RoleRow>('/roles')
+  const { items: roles, total, page, size, loading, search, reload: loadRoles, msgApi, ctx, toastError } = list
   const users = useOptions<UserRow>('users')
   const groups = useOptions<GroupRow>('user-groups')
   const menus = useOptions<MenuItem>('menus')
@@ -35,6 +37,10 @@ export default function RolePage() {
   const [assignIds, setAssignIds] = useState<number[]>([])
   const [savingAssign, setSavingAssign] = useState(false)
   const [form] = Form.useForm()
+  const [fKeyword, setFKeyword] = useState('')
+
+  const doSearch = () => search({ keyword: fKeyword.trim() || undefined })
+  const doReset = () => { setFKeyword(''); search({}) }
 
   // 扁平菜单 → 两级树（parent_id=0 为根；分组节点下挂子菜单）
   const menuTreeData = useMemo(() => {
@@ -104,13 +110,23 @@ export default function RolePage() {
       {ctx}
       <PageHeader title="角色管理" description="角色可分配给用户与用户组；用户被分配的用户组或角色取并集生效；角色可被分配菜单" />
       <Card className="glass-card" variant="borderless">
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, gap: 12, flexWrap: 'wrap' }}>
+          <QueryBar onSearch={doSearch} onReset={doReset} loading={loading}>
+            <Input
+              allowClear
+              placeholder="角色编码 / 名称"
+              style={{ width: 220 }}
+              value={fKeyword}
+              onChange={(e) => setFKeyword(e.target.value)}
+              onPressEnter={doSearch}
+            />
+          </QueryBar>
           <PrimaryButton icon={<PlusOutlined />} onClick={openCreate}>新建角色</PrimaryButton>
         </div>
         <Table<RoleRow>
           rowKey="id"
           dataSource={roles}
-          pagination={false}
+          pagination={tablePagination(page, size, total, list.onPageChange)}
           columns={[
             { title: 'ID', dataIndex: 'id', width: 60 },
             { title: '角色编码', dataIndex: 'code' },

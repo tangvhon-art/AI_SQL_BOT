@@ -1,4 +1,4 @@
-// 数据源管理：CRUD + 连接测试 + Schema 采集 + 进入 Schema 详情
+// 数据源管理：查询条件（名称/类型/状态）+ 服务端分页 + CRUD + 连接测试 + Schema 采集 + 进入 Schema 详情
 import { useState } from 'react'
 import {
   Button, Card, Drawer, Dropdown, Form, Input, Popconfirm, Space, Table, Tag,
@@ -12,8 +12,9 @@ import { useNavigate } from 'react-router-dom'
 import { client } from '../api/client'
 import type { Datasource } from '../types'
 import PageHeader from '../components/PageHeader'
+import QueryBar from '../components/QueryBar'
 import { GlassSelect } from '../ui'
-import { useCrudList } from '../hooks/useCrudList'
+import { tablePagination, usePagedList } from '../hooks/useCrudList'
 
 const TYPE_OPTIONS = [
   { label: 'MySQL', value: 'mysql' },
@@ -31,12 +32,29 @@ const STATUS_MAP: Record<string, { text: string; color: string }> = {
 
 export default function DatasourcePage() {
   const nav = useNavigate()
-  const { data: list, load, msgApi, ctx, toastError } = useCrudList<Datasource>('/datasources')
+  const list = usePagedList<Datasource>('/datasources')
+  const { items, total, page, size, loading, search, reload, onPageChange, msgApi, ctx, toastError } = list
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<Datasource | null>(null)
   const [form] = Form.useForm()
   const [testing, setTesting] = useState<number | null>(null)
   const [syncing, setSyncing] = useState<number | null>(null)
+  // 查询条件
+  const [fKeyword, setFKeyword] = useState('')
+  const [fType, setFType] = useState<string>('')
+  const [fStatus, setFStatus] = useState<string>('')
+
+  const doSearch = () => search({
+    keyword: fKeyword.trim() || undefined,
+    type: fType || undefined,
+    status: fStatus || undefined,
+  })
+  const doReset = () => {
+    setFKeyword('')
+    setFType('')
+    setFStatus('')
+    search({})
+  }
 
   const openCreate = () => {
     setEditing(null)
@@ -65,7 +83,7 @@ export default function DatasourcePage() {
       else await client.post('/datasources', body)
       msgApi.success('已保存')
       setOpen(false)
-      load()
+      reload()
     } catch (e) {
       toastError(e)
     }
@@ -76,7 +94,7 @@ export default function DatasourcePage() {
     try {
       const r = await client.post(`/datasources/${id}/test`)
       msgApi.success(r.data.ok ? '连接成功' : `连接失败：${r.data.message}`)
-      load()
+      reload()
     } catch (e) {
       toastError(e)
     } finally {
@@ -91,7 +109,7 @@ export default function DatasourcePage() {
       const s = r.data.stats
       const inferred = s.inferred_relationships ? `，逻辑推断 ${s.inferred_relationships}` : ''
       msgApi.success(`采集完成：表 ${s.tables}，字段 ${s.columns}，外键关系 ${s.relationships}${inferred}`)
-      load()
+      reload()
     } catch (e) {
       toastError(e)
     } finally {
@@ -103,7 +121,7 @@ export default function DatasourcePage() {
     try {
       await client.delete(`/datasources/${id}`)
       msgApi.success('已删除')
-      load()
+      reload()
     } catch (e) {
       toastError(e)
     }
@@ -136,13 +154,39 @@ export default function DatasourcePage() {
       />
       <Card styles={{ body: { padding: '12px 16px 16px' } }}>
         {ctx}
+        <QueryBar onSearch={doSearch} onReset={doReset} loading={loading}>
+          <Input
+            allowClear
+            placeholder="数据源名称"
+            style={{ width: 200 }}
+            value={fKeyword}
+            onChange={(e) => setFKeyword(e.target.value)}
+            onPressEnter={doSearch}
+          />
+          <GlassSelect
+            allowClear
+            placeholder="类型"
+            style={{ width: 140 }}
+            value={fType || undefined}
+            onChange={(v) => setFType(v ?? '')}
+            options={TYPE_OPTIONS}
+          />
+          <GlassSelect
+            allowClear
+            placeholder="状态"
+            style={{ width: 140 }}
+            value={fStatus || undefined}
+            onChange={(v) => setFStatus(v ?? '')}
+            options={Object.entries(STATUS_MAP).map(([value, s]) => ({ label: s.text, value }))}
+          />
+        </QueryBar>
         <div style={{ marginBottom: 12, color: '#64748b', fontSize: 13 }}>
-          共 <b style={{ color: '#1e293b' }}>{list.length}</b> 个数据源
+          共 <b style={{ color: '#1e293b' }}>{total}</b> 个数据源
         </div>
         <Table
           rowKey="id"
-          dataSource={list}
-          pagination={false}
+          dataSource={items}
+          pagination={tablePagination(page, size, total, onPageChange)}
           size="middle"
           scroll={{ x: 960 }}
           columns={[

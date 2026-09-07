@@ -1,4 +1,5 @@
 // 字段级权限：规则 CRUD（角色/用户 × allow/deny）+ 生效预览（可查并集/不可查并集/黑名单优先 + 命中规则筛选表格）
+// 规则列表支持查询条件（作用域/类型/数据源/表/启用）+ 服务端分页
 import { useMemo, useState } from 'react'
 import {
   Button, Card, Drawer, Form, Input, InputNumber, Popconfirm, Radio, Select, Space, Switch, Table, Tag,
@@ -7,8 +8,9 @@ import { PlusOutlined } from '@ant-design/icons'
 import { client } from '../api/client'
 import type { ColumnMeta, Datasource, PermissionRule, TableMeta } from '../types'
 import PageHeader from '../components/PageHeader'
+import QueryBar from '../components/QueryBar'
 import { GlassSelect } from '../ui'
-import { useCrudList } from '../hooks/useCrudList'
+import { tablePagination, usePagedList } from '../hooks/useCrudList'
 import { useOptions } from '../hooks/useOptions'
 
 interface PreviewRule {
@@ -27,7 +29,8 @@ interface PreviewRule {
 }
 
 export default function PermissionPage() {
-  const { data: rules, load: loadRules, msgApi, ctx, toastError } = useCrudList<PermissionRule>('/permission-rules')
+  const rulesHook = usePagedList<PermissionRule>('/permission-rules')
+  const { items: rules, total, page, size, loading, search, reload: loadRules, onPageChange, msgApi, ctx, toastError } = rulesHook
   const dsList = useOptions<Datasource>('datasources')
   const roles = useOptions<{ id: number; code: string; name: string }>('roles')
   const users = useOptions<{ id: number; username: string; display_name: string }>('users')
@@ -46,6 +49,24 @@ export default function PermissionPage() {
   const [fTable, setFTable] = useState<string>('')
   const [fColumn, setFColumn] = useState<string>('')
   const [fEnabled, setFEnabled] = useState<string>('')
+  // 规则列表查询条件
+  const [rScopeType, setRScopeType] = useState<string>('')
+  const [rRuleType, setRRuleType] = useState<string>('')
+  const [rDatasourceId, setRDatasourceId] = useState<number | undefined>()
+  const [rTable, setRTable] = useState('')
+  const [rEnabled, setREnabled] = useState<string>('')
+
+  const doSearchRules = () => search({
+    scope_type: rScopeType || undefined,
+    rule_type: rRuleType || undefined,
+    datasource_id: rDatasourceId,
+    table: rTable.trim() || undefined,
+    enabled: rEnabled || undefined,
+  })
+  const doResetRules = () => {
+    setRScopeType(''); setRRuleType(''); setRDatasourceId(undefined); setRTable(''); setREnabled('')
+    search({})
+  }
 
   const loadTables = async (dsId: number) => {
     try {
@@ -201,10 +222,21 @@ export default function PermissionPage() {
       </div>
 
       {/* 全部规则列表 */}
+      <QueryBar onSearch={doSearchRules} onReset={doResetRules} loading={loading}>
+        <Select placeholder="作用域" allowClear style={{ width: 110 }} value={rScopeType || undefined} onChange={(v) => setRScopeType(v || '')}
+          options={[{ label: '角色', value: 'role' }, { label: '用户', value: 'user' }]} />
+        <Select placeholder="类型" allowClear style={{ width: 100 }} value={rRuleType || undefined} onChange={(v) => setRRuleType(v || '')}
+          options={[{ label: '可查', value: 'allow' }, { label: '不可查', value: 'deny' }]} />
+        <Select placeholder="数据源" allowClear style={{ width: 160 }} value={rDatasourceId} onChange={(v) => setRDatasourceId(v)}
+          options={dsList.map((d) => ({ label: d.name, value: d.id }))} />
+        <Input placeholder="表名搜索" allowClear style={{ width: 140 }} value={rTable} onChange={(e) => setRTable(e.target.value)} onPressEnter={doSearchRules} />
+        <Select placeholder="是否启用" allowClear style={{ width: 100 }} value={rEnabled || undefined} onChange={(v) => setREnabled(v || '')}
+          options={[{ label: '启用', value: '1' }, { label: '停用', value: '0' }]} />
+      </QueryBar>
       <Table
         rowKey="id"
         dataSource={rules}
-        pagination={false}
+        pagination={tablePagination(page, size, total, onPageChange)}
         columns={[
           {
             title: '作用域', render: (_, r) => (

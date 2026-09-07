@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db, soft_delete_all
 from ..engine.rag import embed_doc_chunks, embed_faq, hybrid_search, split_chunks
 from ..models import DocChunk, FaqPair, KnowledgeDoc, SqlExample
-from .common import get_or_404, workspace_scope
+from .common import get_or_404, paginate, workspace_scope
 from .deps import get_current_user
 
 router = APIRouter(prefix="", tags=["knowledge"])
@@ -35,14 +35,19 @@ def _faq_out(f: FaqPair) -> dict:
 
 # ---------- FAQ ----------
 @router.get("/faqs")
-def list_faqs(q: str = "", category: str = "", db: Session = Depends(get_db),
+def list_faqs(q: str = "", category: str = "", enabled: str = "",
+              page: int = 1, size: int = 20, db: Session = Depends(get_db),
               user=Depends(get_current_user)):
     query = workspace_scope(db, FaqPair, user)
     if q:
         query = query.filter(FaqPair.question.like(f"%{q}%"))
     if category:
-        query = query.filter(FaqPair.category == category)
-    return [_faq_out(f) for f in query.order_by(FaqPair.id.desc()).limit(200).all()]
+        query = query.filter(FaqPair.category.like(f"%{category}%"))
+    if enabled in ("1", "0"):
+        query = query.filter(FaqPair.enabled.is_(enabled == "1"))
+    query = query.order_by(FaqPair.id.desc())
+    rows, total = paginate(query, page, size)
+    return {"total": total, "items": [_faq_out(f) for f in rows]}
 
 
 @router.post("/faqs")
@@ -85,12 +90,22 @@ def delete_faq(faq_id: int, db: Session = Depends(get_db), user=Depends(get_curr
 
 # ---------- 文档 ----------
 @router.get("/documents")
-def list_documents(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    docs = (workspace_scope(db, KnowledgeDoc, user)
-            .order_by(KnowledgeDoc.id.desc()).all())
-    return [{"id": d.id, "name": d.name, "file_type": d.file_type, "size": d.size,
-             "status": d.status, "error_msg": d.error_msg, "version": d.version,
-             "chunk_size": d.chunk_size, "overlap": d.overlap} for d in docs]
+def list_documents(q: str = "", file_type: str = "", status: str = "",
+                   page: int = 1, size: int = 20,
+                   db: Session = Depends(get_db), user=Depends(get_current_user)):
+    query = workspace_scope(db, KnowledgeDoc, user)
+    if q:
+        query = query.filter(KnowledgeDoc.name.like(f"%{q}%"))
+    if file_type:
+        query = query.filter(KnowledgeDoc.file_type == file_type)
+    if status:
+        query = query.filter(KnowledgeDoc.status == status)
+    query = query.order_by(KnowledgeDoc.id.desc())
+    rows, total = paginate(query, page, size)
+    return {"total": total, "items": [{"id": d.id, "name": d.name, "file_type": d.file_type,
+                                       "size": d.size, "status": d.status, "error_msg": d.error_msg,
+                                       "version": d.version, "chunk_size": d.chunk_size,
+                                       "overlap": d.overlap} for d in rows]}
 
 
 @router.post("/documents")

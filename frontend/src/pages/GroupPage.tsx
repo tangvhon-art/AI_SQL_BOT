@@ -1,4 +1,4 @@
-// 用户组管理：用户组 CRUD + 成员管理（组内角色随组生效）
+// 用户组管理：查询条件（组名/备注）+ 服务端分页 + 用户组 CRUD + 成员管理（组内角色随组生效）
 import { useState } from 'react'
 import {
   Card, Drawer, Form, Input, Popconfirm, Space, Table, Tag,
@@ -6,8 +6,9 @@ import {
 import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons'
 import { client } from '../api/client'
 import PageHeader from '../components/PageHeader'
+import QueryBar from '../components/QueryBar'
 import { DefaultButton, GlassSelect, PrimaryButton } from '../ui'
-import { useCrudList } from '../hooks/useCrudList'
+import { tablePagination, usePagedList } from '../hooks/useCrudList'
 import { useOptions } from '../hooks/useOptions'
 
 interface GroupRow {
@@ -21,7 +22,8 @@ interface UserRow { id: number; username: string; display_name: string }
 interface RoleRow { id: number; name: string }
 
 export default function GroupPage() {
-  const { data: groups, load: loadGroups, msgApi, ctx, toastError } = useCrudList<GroupRow>('/user-groups')
+  const list = usePagedList<GroupRow>('/user-groups')
+  const { items: groups, total, page, size, loading, search, reload: loadGroups, msgApi, ctx, toastError } = list
   const users = useOptions<UserRow>('users')
   const roles = useOptions<RoleRow>('roles')
   const [open, setOpen] = useState(false)
@@ -29,6 +31,10 @@ export default function GroupPage() {
   const [assigning, setAssigning] = useState<GroupRow | null>(null)
   const [memberIds, setMemberIds] = useState<number[]>([])
   const [form] = Form.useForm()
+  const [fKeyword, setFKeyword] = useState('')
+
+  const doSearch = () => search({ keyword: fKeyword.trim() || undefined })
+  const doReset = () => { setFKeyword(''); search({}) }
 
   const openCreate = () => { setEditing(null); form.resetFields(); setOpen(true) }
   const openEdit = (g: GroupRow) => { setEditing(g); form.setFieldsValue(g); setOpen(true) }
@@ -64,13 +70,23 @@ export default function GroupPage() {
       {ctx}
       <PageHeader title="用户组管理" description="用户组用于批量授权：组内用户继承组角色，与用户直接角色取并集" />
       <Card className="glass-card" variant="borderless">
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, gap: 12, flexWrap: 'wrap' }}>
+          <QueryBar onSearch={doSearch} onReset={doReset} loading={loading}>
+            <Input
+              allowClear
+              placeholder="组名 / 备注关键字"
+              style={{ width: 220 }}
+              value={fKeyword}
+              onChange={(e) => setFKeyword(e.target.value)}
+              onPressEnter={doSearch}
+            />
+          </QueryBar>
           <PrimaryButton icon={<PlusOutlined />} onClick={openCreate}>新建用户组</PrimaryButton>
         </div>
         <Table<GroupRow>
           rowKey="id"
           dataSource={groups}
-          pagination={false}
+          pagination={tablePagination(page, size, total, list.onPageChange)}
           columns={[
             { title: 'ID', dataIndex: 'id', width: 60 },
             { title: '组名', dataIndex: 'name' },

@@ -1,13 +1,14 @@
 """模型配置管理（LLM / Embedding，OpenAI 兼容）。"""
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..llm import LLMClient, LLMError
 from ..models import ModelConfig
 from ..security import aes_decrypt, aes_encrypt
-from .common import apply_fields, get_or_404, workspace_scope
+from .common import apply_fields, get_or_404, paginate, workspace_scope
 from .deps import get_current_user
 
 router = APIRouter(prefix="/models", tags=["models"])
@@ -35,9 +36,17 @@ def _out(m: ModelConfig) -> dict:
 
 
 @router.get("")
-def list_models(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    models = workspace_scope(db, ModelConfig, user).all()
-    return [_out(m) for m in models]
+def list_models(keyword: str = "", scene: str = "", page: int = 1, size: int = 20,
+                db: Session = Depends(get_db), user=Depends(get_current_user)):
+    query = workspace_scope(db, ModelConfig, user)
+    if keyword:
+        query = query.filter(or_(ModelConfig.name.like(f"%{keyword}%"),
+                                 ModelConfig.model_name.like(f"%{keyword}%")))
+    if scene:
+        query = query.filter(ModelConfig.scene == scene)
+    query = query.order_by(ModelConfig.id.desc())
+    rows, total = paginate(query, page, size)
+    return {"total": total, "items": [_out(m) for m in rows]}
 
 
 @router.post("")
