@@ -1,5 +1,5 @@
-"""文件问答主逻辑：联合检索 → Prompt 组装 → LLM 流式生成 → 引用溯源。
-不走意图识别/SQL，仅基于上传文件和知识库内容回答。"""
+"""文件问答主逻辑：文件检索 → Prompt 组装 → LLM 流式生成 → 引用溯源。
+不走意图识别/SQL，仅基于上传的文件内容回答（不检索系统知识库）。"""
 from __future__ import annotations
 
 import json
@@ -7,7 +7,7 @@ import logging
 import time
 
 from .doc_retriever import (FINAL_TOP_K, MIN_SCORE, embed_question,
-                             format_context, joint_retrieve)
+                             format_context, retrieve_file_chunks)
 from .doc_store import DocSessionFile, get_store
 from ..database import SessionLocal
 from .llm_provider import resolve_llm_client, resolve_llm_client_by_id
@@ -15,15 +15,15 @@ from ..llm import LLMError
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """你是一个文档问答助手。请严格根据以下提供的【文件内容】和【知识库内容】回答用户问题。
+SYSTEM_PROMPT = """你是一个文档问答助手。请严格根据以下提供的【文件内容】回答用户问题。
 
 【硬性规则】
-1. 仅基于提供的文件和知识库内容回答，不得使用文件外的知识，不得编造数据、日期、人名、条款等信息
-2. 如果文件和知识库中都没有相关信息，明确回答"未找到相关内容"，不要猜测或编造
+1. 仅基于提供的文件内容回答，不得使用文件外的知识，不得编造数据、日期、人名、条款等信息
+2. 如果文件中没有相关信息，明确回答"未找到相关内容"，不要猜测或编造
 3. 回答中引用内容时，在对应句子末尾标注引用编号，如 [1] [2]，编号对应下方资料的序号
 4. 回答简洁、准确，直接给出结论，不重复原文，不输出思考过程
 5. 涉及数字、日期、金额时，必须与原文完全一致，不得擅自换算或四舍五入
-6. 不执行任何数据库查询或 SQL，所有信息均来自提供的文档和知识库片段
+6. 不执行任何数据库查询或 SQL，所有信息均来自提供的文档内容
 7. 用中文回答，语言自然流畅，适合业务人员阅读"""
 
 
@@ -92,13 +92,14 @@ def doc_chat_stream(
     # 2. 问题向量化
     question_vector = embed_question(question, workspace_id)
 
-    # 3. 联合检索
-    hits, max_score = joint_retrieve(question, question_vector, ready_files, workspace_id)
+    # 3. 文件检索（不检索系统知识库，仅基于上传的文档回答）
+    hits = retrieve_file_chunks(question_vector, ready_files, top_k=FINAL_TOP_K)
+    max_score = max((h["score"] for h in hits), default=0.0)
 
     # 4. 相关性过滤
     if not hits or max_score < MIN_SCORE:
         logger.info("无相关内容（最高相似度 %.4f < %.2f），不调用 LLM", max_score, MIN_SCORE)
-        yield {"event": "answer", "data": {"delta": "未在文件和知识库中找到与问题相关的内容。请尝试换一种问法，或确认文件是否包含相关信息。"}}
+        yield {"event": "answer", "data": {"delta": "未在文件中找到与问题相关的内容。请尝试换一种问法，或确认文件是否包含相关信息。"}}
         yield {"event": "references", "data": {"references": []}}
         yield {"event": "trace", "data": {
             "file_ids": file_ids,
