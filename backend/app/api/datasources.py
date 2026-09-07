@@ -4,10 +4,11 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..database import get_db, soft_delete_all
+from ..database import get_db
 from ..models import ColumnMeta, Datasource, Relationship, TableMeta
-from ..security import aes_decrypt, aes_encrypt
+from ..security import aes_encrypt
 from ..services.datasource_service import sync_schema, test_connection
+from .common import apply_fields, get_owned_or_404, soft_delete, workspace_scope
 from .deps import get_current_user
 
 router = APIRouter(prefix="/datasources", tags=["datasources"])
@@ -41,8 +42,7 @@ def _out(ds: Datasource) -> dict:
 
 @router.get("")
 def list_datasources(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    return [_out(ds) for ds in db.query(Datasource)
-            .filter(Datasource.workspace_id == user.workspace_id).all()]
+    return [_out(ds) for ds in workspace_scope(db, Datasource, user).all()]
 
 
 @router.post("")
@@ -61,11 +61,8 @@ def create_datasource(body: DatasourceIn, db: Session = Depends(get_db),
 @router.put("/{ds_id}")
 def update_datasource(ds_id: int, body: DatasourceIn, db: Session = Depends(get_db),
                       user=Depends(get_current_user)):
-    ds = db.query(Datasource).get(ds_id)
-    if not ds or ds.workspace_id != user.workspace_id:
-        raise HTTPException(404, "数据源不存在")
-    for f in ("name", "type", "host", "port", "db_name", "user", "params_json"):
-        setattr(ds, f, getattr(body, f))
+    ds = get_owned_or_404(db, Datasource, ds_id, user, "数据源不存在")
+    apply_fields(ds, body, ("name", "type", "host", "port", "db_name", "user", "params_json"))
     if body.password:
         ds.password_enc = aes_encrypt(body.password)
     db.commit()
@@ -74,25 +71,19 @@ def update_datasource(ds_id: int, body: DatasourceIn, db: Session = Depends(get_
 
 @router.delete("/{ds_id}")
 def delete_datasource(ds_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    ds = db.query(Datasource).get(ds_id)
-    if not ds or ds.workspace_id != user.workspace_id:
-        raise HTTPException(404, "数据源不存在")
-    soft_delete_all(db.query(Relationship).filter(Relationship.datasource_id == ds_id))
+    ds = get_owned_or_404(db, Datasource, ds_id, user, "数据源不存在")
     tbl_ids = [t.id for t in db.query(TableMeta)
                .filter(TableMeta.datasource_id == ds_id).all()]
-    if tbl_ids:
-        soft_delete_all(db.query(ColumnMeta).filter(ColumnMeta.table_meta_id.in_(tbl_ids)))
-        soft_delete_all(db.query(TableMeta).filter(TableMeta.id.in_(tbl_ids)))
-    ds.is_deleted = True
-    db.commit()
+    soft_delete(db, ds,
+                db.query(Relationship).filter(Relationship.datasource_id == ds_id),
+                db.query(ColumnMeta).filter(ColumnMeta.table_meta_id.in_(tbl_ids)) if tbl_ids else None,
+                db.query(TableMeta).filter(TableMeta.id.in_(tbl_ids)) if tbl_ids else None)
     return {"ok": True}
 
 
 @router.post("/{ds_id}/test")
 def test(ds_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    ds = db.query(Datasource).get(ds_id)
-    if not ds or ds.workspace_id != user.workspace_id:
-        raise HTTPException(404, "数据源不存在")
+    ds = get_owned_or_404(db, Datasource, ds_id, user, "数据源不存在")
     ok, msg = test_connection(ds)
     ds.status = "ok" if ok else "failed"
     db.commit()
@@ -101,9 +92,7 @@ def test(ds_id: int, db: Session = Depends(get_db), user=Depends(get_current_use
 
 @router.post("/{ds_id}/sync-schema")
 def sync(ds_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    ds = db.query(Datasource).get(ds_id)
-    if not ds or ds.workspace_id != user.workspace_id:
-        raise HTTPException(404, "数据源不存在")
+    ds = get_owned_or_404(db, Datasource, ds_id, user, "数据源不存在")
     ds.status = "syncing"
     db.commit()
     try:
@@ -150,9 +139,7 @@ class CommentIn(BaseModel):
 @router.put("/columns/{col_id}/comment")
 def update_comment(col_id: int, body: CommentIn, db: Session = Depends(get_db),
                    user=Depends(get_current_user)):
-    col = db.query(ColumnMeta).get(col_id)
-    if not col:
-        raise HTTPException(404, "字段不存在")
+    col = get_or_404(db, ColumnMeta, col_id, "字段不存在")
     col.comment = body.comment
     db.commit()
     return {"ok": True}

@@ -1,13 +1,15 @@
 // 字段级权限：规则 CRUD（角色/用户 × allow/deny）+ 生效预览（可查并集/不可查并集/黑名单优先 + 命中规则筛选表格）
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
-  Button, Card, Drawer, Form, Input, InputNumber, Popconfirm, Radio, Select, Space, Switch, Table, Tag, message,
+  Button, Card, Drawer, Form, Input, InputNumber, Popconfirm, Radio, Select, Space, Switch, Table, Tag,
 } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
-import { client, errMsg } from '../api/client'
+import { client } from '../api/client'
 import type { ColumnMeta, Datasource, PermissionRule, TableMeta } from '../types'
 import PageHeader from '../components/PageHeader'
 import { GlassSelect } from '../ui'
+import { useCrudList } from '../hooks/useCrudList'
+import { useOptions } from '../hooks/useOptions'
 
 interface PreviewRule {
   id: number
@@ -25,17 +27,16 @@ interface PreviewRule {
 }
 
 export default function PermissionPage() {
-  const [msgApi, ctx] = message.useMessage()
-  const [rules, setRules] = useState<PermissionRule[]>([])
+  const { data: rules, load: loadRules, msgApi, ctx, toastError } = useCrudList<PermissionRule>('/permission-rules')
+  const dsList = useOptions<Datasource>('datasources')
+  const roles = useOptions<{ id: number; code: string; name: string }>('roles')
+  const users = useOptions<{ id: number; username: string; display_name: string }>('users')
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<PermissionRule | null>(null)
   const [form] = Form.useForm()
   const scopeType = Form.useWatch('scope_type', form)
-  const [dsList, setDsList] = useState<Datasource[]>([])
   const [tables, setTables] = useState<TableMeta[]>([])
   const [cols, setCols] = useState<Array<{ label: string; value: number }>>([])
-  const [roles, setRoles] = useState<Array<{ id: number; code: string; name: string }>>([])
-  const [users, setUsers] = useState<Array<{ id: number; username: string; display_name: string }>>([])
   const [previewUser, setPreviewUser] = useState<number | null>(null)
   const [preview, setPreview] = useState<{ allow: unknown[]; deny: unknown[]; rules: PreviewRule[] } | null>(null)
   // 生效预览筛选条件
@@ -45,19 +46,6 @@ export default function PermissionPage() {
   const [fTable, setFTable] = useState<string>('')
   const [fColumn, setFColumn] = useState<string>('')
   const [fEnabled, setFEnabled] = useState<string>('')
-
-  const load = async () => {
-    try {
-      const r = await client.get<PermissionRule[]>('/permission-rules')
-      setRules(r.data)
-    } catch (e) { msgApi.error(errMsg(e)) }
-  }
-  useEffect(() => {
-    load()
-    client.get<Datasource[]>('/datasources').then((r) => setDsList(r.data)).catch(() => {})
-    client.get('/roles').then((r) => setRoles(r.data)).catch(() => {})
-    client.get('/users').then((r) => setUsers(r.data)).catch(() => {})
-  }, [])
 
   const loadTables = async (dsId: number) => {
     try {
@@ -113,8 +101,8 @@ export default function PermissionPage() {
         msgApi.success(`已创建 ${ids.length} 条规则`)
       }
       setOpen(false)
-      load()
-    } catch (e) { msgApi.error(errMsg(e)) }
+      loadRules()
+    } catch (e) { toastError(e) }
   }
 
   const previewEffective = async () => {
@@ -124,7 +112,7 @@ export default function PermissionPage() {
       setPreview(r.data)
       // 重置筛选
       setFScopeType(''); setFRuleType(''); setFDatasource(undefined); setFTable(''); setFColumn(''); setFEnabled('')
-    } catch (e) { msgApi.error(errMsg(e)) }
+    } catch (e) { toastError(e) }
   }
 
   // 作用域名称展示（不显示 ID）
@@ -234,7 +222,7 @@ export default function PermissionPage() {
             render: (_, r) => (
               <Space size={4}>
                 <Button size="small" onClick={() => openEdit(r)}>编辑</Button>
-                <Popconfirm title="删除规则？" onConfirm={async () => { await client.delete(`/permission-rules/${r.id}`); load() }}>
+                <Popconfirm title="删除规则？" onConfirm={async () => { await client.delete(`/permission-rules/${r.id}`); loadRules() }}>
                   <Button size="small" danger>删除</Button>
                 </Popconfirm>
               </Space>

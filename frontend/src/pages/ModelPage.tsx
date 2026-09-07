@@ -1,28 +1,20 @@
 // 模型配置：OpenAI 兼容 LLM/Embedding
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import {
- Button, Card, Drawer, Form, Input, InputNumber, Popconfirm, Space, Switch, Table, Tag, message,
+ Button, Card, Drawer, Form, Input, InputNumber, Popconfirm, Space, Switch, Table, Tag,
 } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
-import { client, errMsg } from '../api/client'
+import { client } from '../api/client'
 import type { ModelItem } from '../types'
 import PageHeader from '../components/PageHeader'
 import { GlassSelect } from '../ui'
+import { useCrudList } from '../hooks/useCrudList'
 
 export default function ModelPage() {
-  const [msgApi, ctx] = message.useMessage()
-  const [list, setList] = useState<ModelItem[]>([])
+  const { data: list, load, msgApi, ctx, toastError } = useCrudList<ModelItem>('/models')
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<ModelItem | null>(null)
   const [form] = Form.useForm()
-
-  const load = async () => {
-    try {
-      const r = await client.get<ModelItem[]>('/models')
-      setList(r.data)
-    } catch (e) { msgApi.error(errMsg(e)) }
-  }
-  useEffect(() => { load() }, [])
 
   const openCreate = () => { setEditing(null); form.resetFields(); setOpen(true) }
   const openEdit = (m: ModelItem) => { setEditing(m); form.setFieldsValue(m); setOpen(true) }
@@ -35,14 +27,14 @@ export default function ModelPage() {
       msgApi.success('已保存')
       setOpen(false)
       load()
-    } catch (e) { msgApi.error(errMsg(e)) }
+    } catch (e) { toastError(e) }
   }
 
   const test = async (m: ModelItem) => {
     try {
       const r = await client.post(`/models/${m.id}/test`)
       msgApi[r.data.ok ? 'success' : 'error'](r.data.ok ? `连通正常：${r.data.reply}` : `失败：${r.data.message}`)
-    } catch (e) { msgApi.error(errMsg(e)) }
+    } catch (e) { toastError(e) }
   }
 
   return (

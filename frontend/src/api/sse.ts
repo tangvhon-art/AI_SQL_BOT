@@ -1,4 +1,6 @@
 // SSE 问数客户端：解析事件流并回调
+import { TOKEN_KEY } from './client'
+
 export interface SSEHandlers {
   onProgress?: (stage: string, msg: string) => void
   onSql?: (payload: { sql: string; dialect: string; permission: string }) => void
@@ -39,7 +41,7 @@ export async function postChatStream(
   },
   handlers: SSEHandlers,
 ): Promise<void> {
-  const token = localStorage.getItem('ai_sql_bot_token')
+  const token = localStorage.getItem(TOKEN_KEY)
   const resp = await fetch('/api/v1/chat', {
     method: 'POST',
     headers: {

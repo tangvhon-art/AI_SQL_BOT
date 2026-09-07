@@ -1,17 +1,18 @@
 // Schema 详情：表/字段（comment 补录）+ 表关系
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { Button, Card, Drawer, Form, Input, Popconfirm, Space, Table, Tabs, Tag, message } from 'antd'
+import { Button, Card, Drawer, Form, Input, Popconfirm, Space, Table, Tabs, Tag } from 'antd'
 import { PlusOutlined, SearchOutlined } from '@ant-design/icons'
-import { client, errMsg } from '../api/client'
+import { client } from '../api/client'
 import type { ColumnMeta, Relationship, TableMeta } from '../types'
 import PageHeader from '../components/PageHeader'
 import { GlassSelect } from '../ui'
+import { useMessageApi } from '../hooks/useMessageApi'
 
 export default function SchemaPage() {
   const { id } = useParams()
   const dsId = Number(id)
-  const [msgApi, ctx] = message.useMessage()
+  const { msgApi, ctx, toastError } = useMessageApi()
   const [tables, setTables] = useState<TableMeta[]>([])
   const [selected, setSelected] = useState<TableMeta | null>(null)
   const [columns, setColumns] = useState<ColumnMeta[]>([])
@@ -32,7 +33,7 @@ export default function SchemaPage() {
         setSelected(t.data[0])
       }
     } catch (err) {
-      msgApi.error(errMsg(err))
+      toastError(err)
     }
   }
   useEffect(() => { loadAll() }, [dsId])
@@ -49,7 +50,7 @@ export default function SchemaPage() {
       msgApi.success('注释已保存')
       setColumns((cs) => cs.map((c) => (c.id === colId ? { ...c, comment } : c)))
     } catch (e) {
-      msgApi.error(errMsg(e))
+      toastError(e)
     }
   }
 
@@ -61,7 +62,7 @@ export default function SchemaPage() {
       setRelOpen(false)
       loadAll()
     } catch (e) {
-      msgApi.error(errMsg(e))
+      toastError(e)
     }
   }
 
@@ -71,7 +72,7 @@ export default function SchemaPage() {
       msgApi.success('已删除')
       loadAll()
     } catch (e) {
-      msgApi.error(errMsg(e))
+      toastError(e)
     }
   }
 

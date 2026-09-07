@@ -1,12 +1,14 @@
 // 用户管理：用户 CRUD + 分配角色 / 分配用户组（用户被分配的用户组或角色，两者取并集）
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import {
-  Card, Drawer, Form, Input, Popconfirm, Space, Switch, Table, Tag, message,
+  Card, Drawer, Form, Input, Popconfirm, Space, Switch, Table, Tag,
 } from 'antd'
 import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons'
-import { client, errMsg } from '../api/client'
+import { client } from '../api/client'
 import PageHeader from '../components/PageHeader'
 import { DefaultButton, GlassSelect, PrimaryButton, TabSwitch } from '../ui'
+import { useCrudList } from '../hooks/useCrudList'
+import { useOptions } from '../hooks/useOptions'
 
 interface UserRow {
   id: number
@@ -24,28 +26,15 @@ interface RoleRow { id: number; name: string }
 interface GroupRow { id: number; name: string }
 
 export default function UserPage() {
-  const [msgApi, ctx] = message.useMessage()
-  const [users, setUsers] = useState<UserRow[]>([])
-  const [roles, setRoles] = useState<RoleRow[]>([])
-  const [groups, setGroups] = useState<GroupRow[]>([])
+  const { data: users, load: loadUsers, msgApi, ctx, toastError } = useCrudList<UserRow>('/users')
+  const roles = useOptions<RoleRow>('roles')
+  const groups = useOptions<GroupRow>('user-groups')
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<UserRow | null>(null)
   const [assigning, setAssigning] = useState<UserRow | null>(null)
   const [assignTab, setAssignTab] = useState<'roles' | 'groups'>('roles')
   const [assignIds, setAssignIds] = useState<number[]>([])
   const [form] = Form.useForm()
-
-  const load = async () => {
-    try {
-      const r = await client.get<UserRow[]>('/users')
-      setUsers(r.data)
-    } catch (e) { msgApi.error(errMsg(e)) }
-  }
-  useEffect(() => {
-    load()
-    client.get<RoleRow[]>('/roles').then((r) => setRoles(r.data)).catch(() => {})
-    client.get<GroupRow[]>('/user-groups').then((r) => setGroups(r.data)).catch(() => {})
-  }, [])
 
   const openCreate = () => {
     setEditing(null)
@@ -65,15 +54,15 @@ export default function UserPage() {
       else await client.post('/users', v)
       msgApi.success('已保存')
       setOpen(false)
-      load()
-    } catch (e) { if (typeof e === 'object' && e && 'errorFields' in e) return; msgApi.error(errMsg(e)) }
+      loadUsers()
+    } catch (e) { if (typeof e === 'object' && e && 'errorFields' in e) return; toastError(e) }
   }
   const remove = async (u: UserRow) => {
     try {
       await client.delete(`/users/${u.id}`)
       msgApi.success('已删除')
-      load()
-    } catch (e) { msgApi.error(errMsg(e)) }
+      loadUsers()
+    } catch (e) { toastError(e) }
   }
   const openAssign = (u: UserRow, tab: 'roles' | 'groups') => {
     setAssigning(u)
@@ -86,8 +75,8 @@ export default function UserPage() {
       await client.put(`/users/${assigning.id}/${assignTab}`, { ids: assignIds })
       msgApi.success('分配已保存（角色与用户组取并集）')
       setAssigning(null)
-      load()
-    } catch (e) { msgApi.error(errMsg(e)) }
+      loadUsers()
+    } catch (e) { toastError(e) }
   }
 
   return (

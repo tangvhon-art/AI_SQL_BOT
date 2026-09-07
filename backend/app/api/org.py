@@ -9,6 +9,7 @@ from ..database import get_db, soft_delete_all
 from ..models import (Menu, Role, RoleMenu, RoleUser, RoleUserGroup,
                       User, UserGroup, UserGroupMember)
 from ..security import hash_password
+from .common import get_or_404, workspace_scope
 from .deps import get_current_user
 
 router = APIRouter(tags=["org"])
@@ -122,9 +123,7 @@ def create_role(body: RoleIn, db: Session = Depends(get_db), user=Depends(get_cu
 @router.put("/roles/{role_id}")
 def update_role(role_id: int, body: RoleIn, db: Session = Depends(get_db),
                 user=Depends(get_current_user)):
-    r = db.query(Role).get(role_id)
-    if not r:
-        raise HTTPException(404, "角色不存在")
+    r = get_or_404(db, Role, role_id, "角色不存在")
     r.code, r.name = body.code, body.name
     db.commit()
     return _role_out(r)
@@ -184,7 +183,7 @@ class GroupIn(BaseModel):
 
 @router.get("/user-groups")
 def list_groups(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    groups = db.query(UserGroup).filter(UserGroup.workspace_id == user.workspace_id).all()
+    groups = workspace_scope(db, UserGroup, user).all()
     out = []
     for g in groups:
         item = _group_out(g)
@@ -208,9 +207,7 @@ def create_group(body: GroupIn, db: Session = Depends(get_db), user=Depends(get_
 @router.put("/user-groups/{group_id}")
 def update_group(group_id: int, body: GroupIn, db: Session = Depends(get_db),
                  user=Depends(get_current_user)):
-    g = db.query(UserGroup).get(group_id)
-    if not g:
-        raise HTTPException(404, "用户组不存在")
+    g = get_or_404(db, UserGroup, group_id, "用户组不存在")
     g.name, g.remark = body.name, body.remark
     db.commit()
     return _group_out(g)
@@ -249,7 +246,7 @@ class UserIn(BaseModel):
 
 @router.get("/users")
 def list_users(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    users = db.query(User).filter(User.workspace_id == user.workspace_id).all()
+    users = workspace_scope(db, User, user).all()
     out = []
     for u in users:
         item = _user_out(u)
@@ -283,9 +280,7 @@ def create_user(body: UserIn, db: Session = Depends(get_db), user=Depends(get_cu
 @router.put("/users/{user_id}")
 def update_user(user_id: int, body: UserIn, db: Session = Depends(get_db),
                 user=Depends(get_current_user)):
-    u = db.query(User).get(user_id)
-    if not u:
-        raise HTTPException(404, "用户不存在")
+    u = get_or_404(db, User, user_id, "用户不存在")
     u.display_name = body.display_name
     u.status = body.status
     if body.role_id:

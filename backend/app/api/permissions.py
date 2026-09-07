@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..engine.permission import compute_permissions
 from ..models import ColumnMeta, Datasource, PermissionRule, Role, TableMeta, User
+from .common import get_or_404, workspace_scope
 from .deps import get_current_user
 
 router = APIRouter(prefix="/permission-rules", tags=["permissions"])
@@ -38,8 +39,7 @@ def _col_names(db: Session, table_id: int, col_ids: list[int]) -> list[str]:
 
 @router.get("")
 def list_rules(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    rules = (db.query(PermissionRule)
-             .filter(PermissionRule.workspace_id == user.workspace_id).all())
+    rules = workspace_scope(db, PermissionRule, user).all()
     out = []
     for r in rules:
         item = _out(r)
@@ -66,9 +66,7 @@ def create_rule(body: RuleIn, db: Session = Depends(get_db), user=Depends(get_cu
 @router.put("/{rule_id}")
 def update_rule(rule_id: int, body: RuleIn, db: Session = Depends(get_db),
                 user=Depends(get_current_user)):
-    r = db.query(PermissionRule).get(rule_id)
-    if not r:
-        raise HTTPException(404, "规则不存在")
+    r = get_or_404(db, PermissionRule, rule_id, "规则不存在")
     for k, v in body.model_dump().items():
         setattr(r, k, v)
     db.commit()
@@ -87,9 +85,7 @@ def delete_rule(rule_id: int, db: Session = Depends(get_db), user=Depends(get_cu
 @router.get("/effective")
 def effective(user_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
     """给定用户生效的权限视图（可查并集/不可查并集/黑名单优先）。"""
-    target = db.query(User).get(user_id)
-    if not target:
-        raise HTTPException(404, "用户不存在")
+    target = get_or_404(db, User, user_id, "用户不存在")
     allow, deny = compute_permissions(user_id, target.workspace_id)
 
     def _explain(keys: set[str]) -> list[dict]:

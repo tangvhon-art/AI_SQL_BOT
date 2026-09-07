@@ -1,11 +1,12 @@
 // 登录页
 import { useState } from 'react'
-import { Button, Card, Form, Input, Typography, message } from 'antd'
+import { Button, Card, Form, Input, Typography } from 'antd'
 import { LockOutlined, UserOutlined } from '@ant-design/icons'
 import { client, TOKEN_KEY } from '../api/client'
+import { useMessageApi } from '../hooks/useMessageApi'
 
 export default function LoginPage({ onLogin }: { onLogin: () => void }) {
-  const [msgApi, ctx] = message.useMessage()
+  const { msgApi, ctx } = useMessageApi()
   const [loading, setLoading] = useState(false)
 
   const submit = async (values: { username: string; password: string }) => {

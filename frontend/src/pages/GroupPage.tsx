@@ -1,12 +1,14 @@
 // 用户组管理：用户组 CRUD + 成员管理（组内角色随组生效）
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import {
-  Card, Drawer, Form, Input, Popconfirm, Space, Table, Tag, message,
+  Card, Drawer, Form, Input, Popconfirm, Space, Table, Tag,
 } from 'antd'
 import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons'
-import { client, errMsg } from '../api/client'
+import { client } from '../api/client'
 import PageHeader from '../components/PageHeader'
 import { DefaultButton, GlassSelect, PrimaryButton } from '../ui'
+import { useCrudList } from '../hooks/useCrudList'
+import { useOptions } from '../hooks/useOptions'
 
 interface GroupRow {
   id: number
@@ -19,27 +21,14 @@ interface UserRow { id: number; username: string; display_name: string }
 interface RoleRow { id: number; name: string }
 
 export default function GroupPage() {
-  const [msgApi, ctx] = message.useMessage()
-  const [groups, setGroups] = useState<GroupRow[]>([])
-  const [users, setUsers] = useState<UserRow[]>([])
-  const [roles, setRoles] = useState<RoleRow[]>([])
+  const { data: groups, load: loadGroups, msgApi, ctx, toastError } = useCrudList<GroupRow>('/user-groups')
+  const users = useOptions<UserRow>('users')
+  const roles = useOptions<RoleRow>('roles')
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<GroupRow | null>(null)
   const [assigning, setAssigning] = useState<GroupRow | null>(null)
   const [memberIds, setMemberIds] = useState<number[]>([])
   const [form] = Form.useForm()
-
-  const load = async () => {
-    try {
-      const r = await client.get<GroupRow[]>('/user-groups')
-      setGroups(r.data)
-    } catch (e) { msgApi.error(errMsg(e)) }
-  }
-  useEffect(() => {
-    load()
-    client.get<UserRow[]>('/users').then((r) => setUsers(r.data)).catch(() => {})
-    client.get<RoleRow[]>('/roles').then((r) => setRoles(r.data)).catch(() => {})
-  }, [])
 
   const openCreate = () => { setEditing(null); form.resetFields(); setOpen(true) }
   const openEdit = (g: GroupRow) => { setEditing(g); form.setFieldsValue(g); setOpen(true) }
@@ -50,15 +39,15 @@ export default function GroupPage() {
       else await client.post('/user-groups', v)
       msgApi.success('已保存')
       setOpen(false)
-      load()
-    } catch (e) { if (typeof e === 'object' && e && 'errorFields' in e) return; msgApi.error(errMsg(e)) }
+      loadGroups()
+    } catch (e) { if (typeof e === 'object' && e && 'errorFields' in e) return; toastError(e) }
   }
   const remove = async (g: GroupRow) => {
     try {
       await client.delete(`/user-groups/${g.id}`)
       msgApi.success('已删除')
-      load()
-    } catch (e) { msgApi.error(errMsg(e)) }
+      loadGroups()
+    } catch (e) { toastError(e) }
   }
   const saveMembers = async () => {
     if (!assigning) return
@@ -66,8 +55,8 @@ export default function GroupPage() {
       await client.put(`/user-groups/${assigning.id}/members`, { ids: memberIds })
       msgApi.success('成员已更新')
       setAssigning(null)
-      load()
-    } catch (e) { msgApi.error(errMsg(e)) }
+      loadGroups()
+    } catch (e) { toastError(e) }
   }
 
   return (

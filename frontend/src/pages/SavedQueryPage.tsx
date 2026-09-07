@@ -1,14 +1,15 @@
 // 保存查询 + 定时任务：参数化编辑、cron 快捷模板、立即执行、运行历史（图表快照）
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import {
- Button, Card, Drawer, Form, Input, Popconfirm, Space, Table, Tabs, Tag, Timeline, message,
+ Button, Card, Drawer, Form, Input, Popconfirm, Space, Table, Tabs, Tag, Timeline,
 } from 'antd'
 import { PlayCircleOutlined, PlusOutlined } from '@ant-design/icons'
-import { client, errMsg } from '../api/client'
+import { client } from '../api/client'
 import type { SavedQuery, ScheduledTask } from '../types'
 import ChartCard from '../components/ChartCard'
 import PageHeader from '../components/PageHeader'
 import { GlassSelect } from '../ui'
+import { useCrudList } from '../hooks/useCrudList'
 
 const CRON_OPTIONS = [
   { label: '每天 09:00', value: 'daily 09:00' },
@@ -19,9 +20,11 @@ const CRON_OPTIONS = [
 ]
 
 export default function SavedQueryPage() {
-  const [msgApi, ctx] = message.useMessage()
-  const [sqs, setSqs] = useState<SavedQuery[]>([])
-  const [tasks, setTasks] = useState<ScheduledTask[]>([])
+  const sqHook = useCrudList<SavedQuery>('/saved-queries')
+  const taskHook = useCrudList<ScheduledTask>('/scheduled-tasks')
+  const { data: sqs, load: loadSqs, msgApi, toastError } = sqHook
+  const { data: tasks, load: loadTasks } = taskHook
+  const reload = () => { loadSqs(); loadTasks() }
   const [sqOpen, setSqOpen] = useState(false)
   const [editingSq, setEditingSq] = useState<SavedQuery | null>(null)
   const [sqForm] = Form.useForm()
@@ -30,18 +33,6 @@ export default function SavedQueryPage() {
   const [taskForm] = Form.useForm()
   const [runs, setRuns] = useState<Array<{ id: number; run_time?: string; status: string; param_values: Record<string, unknown>; row_count: number; latency_ms?: number; error_msg: string; chart_snapshot: Record<string, unknown> }>>([])
   const [runsOpen, setRunsOpen] = useState(false)
-
-  const load = async () => {
-    try {
-      const [s, t] = await Promise.all([
-        client.get<SavedQuery[]>('/saved-queries'),
-        client.get<ScheduledTask[]>('/scheduled-tasks'),
-      ])
-      setSqs(s.data)
-      setTasks(t.data)
-    } catch (e) { msgApi.error(errMsg(e)) }
-  }
-  useEffect(() => { load() }, [])
 
   const openCreateSq = () => { setEditingSq(null); sqForm.resetFields(); setSqOpen(true) }
   const openEditSq = (sq: SavedQuery) => {
@@ -65,8 +56,8 @@ export default function SavedQueryPage() {
       else await client.post('/saved-queries', body)
       msgApi.success('已保存')
       setSqOpen(false)
-      load()
-    } catch (e) { msgApi.error(errMsg(e)) }
+      reload()
+    } catch (e) { toastError(e) }
   }
 
   const openCreateTask = () => {
@@ -87,8 +78,8 @@ export default function SavedQueryPage() {
       else await client.post('/scheduled-tasks', v)
       msgApi.success('已保存')
       setTaskOpen(false)
-      load()
-    } catch (e) { msgApi.error(errMsg(e)) }
+      reload()
+    } catch (e) { toastError(e) }
   }
 
   const runNow = async (id: number) => {
@@ -96,7 +87,7 @@ export default function SavedQueryPage() {
       const r = await client.post(`/scheduled-tasks/${id}/run`)
       if (r.data.ok) msgApi.success(`执行成功，返回 ${r.data.row_count} 行`)
       else msgApi.error(`执行失败：${r.data.error}`)
-    } catch (e) { msgApi.error(errMsg(e)) }
+    } catch (e) { toastError(e) }
   }
 
   const showRuns = async (id: number) => {
@@ -104,7 +95,7 @@ export default function SavedQueryPage() {
       const r = await client.get(`/scheduled-tasks/${id}/runs`)
       setRuns(r.data)
       setRunsOpen(true)
-    } catch (e) { msgApi.error(errMsg(e)) }
+    } catch (e) { toastError(e) }
   }
 
   return (
@@ -114,7 +105,7 @@ export default function SavedQueryPage() {
         description="问数结果保存为参数化查询；cron 定时按参数化内容生成数据与图表快照，沿用创建者权限"
       />
       <Card styles={{ header: { display: 'none' } }}>
-      {ctx}
+      {sqHook.ctx}{taskHook.ctx}
       <Tabs
         items={[
           {
@@ -139,7 +130,7 @@ export default function SavedQueryPage() {
                       render: (_, r) => (
                         <Space size={4}>
                           <Button size="small" onClick={() => openEditSq(r)}>编辑</Button>
-                          <Popconfirm title="删除？" onConfirm={async () => { await client.delete(`/saved-queries/${r.id}`); load() }}>
+                          <Popconfirm title="删除？" onConfirm={async () => { await client.delete(`/saved-queries/${r.id}`); reload() }}>
                             <Button size="small" danger>删除</Button>
                           </Popconfirm>
                         </Space>
@@ -197,7 +188,7 @@ export default function SavedQueryPage() {
                           <Button size="small" icon={<PlayCircleOutlined />} onClick={() => runNow(r.id)}>立即执行</Button>
                           <Button size="small" onClick={() => showRuns(r.id)}>历史</Button>
                           <Button size="small" onClick={() => openEditTask(r)}>编辑</Button>
-                          <Popconfirm title="删除任务？" onConfirm={async () => { await client.delete(`/scheduled-tasks/${r.id}`); load() }}>
+                          <Popconfirm title="删除任务？" onConfirm={async () => { await client.delete(`/scheduled-tasks/${r.id}`); reload() }}>
                             <Button size="small" danger>删除</Button>
                           </Popconfirm>
                         </Space>

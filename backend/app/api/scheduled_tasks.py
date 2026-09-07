@@ -3,9 +3,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..database import get_db, soft_delete_all
+from ..database import get_db
 from ..engine.scheduler import parse_cron, run_task
 from ..models import SavedQuery, ScheduledTask, TaskRunLog
+from .common import get_or_404, soft_delete, workspace_scope
 from .deps import get_current_user
 
 router = APIRouter(tags=["saved"])
@@ -29,9 +30,7 @@ def _sq_out(sq: SavedQuery) -> dict:
 
 @router.get("/saved-queries")
 def list_saved(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    rows = (db.query(SavedQuery)
-            .filter(SavedQuery.workspace_id == user.workspace_id)
-            .order_by(SavedQuery.id.desc()).all())
+    rows = workspace_scope(db, SavedQuery, user).order_by(SavedQuery.id.desc()).all()
     return [_sq_out(sq) for sq in rows]
 
 
@@ -52,9 +51,7 @@ def create_saved(body: SavedQueryIn, db: Session = Depends(get_db),
 @router.put("/saved-queries/{sq_id}")
 def update_saved(sq_id: int, body: SavedQueryIn, db: Session = Depends(get_db),
                  user=Depends(get_current_user)):
-    sq = db.query(SavedQuery).get(sq_id)
-    if not sq:
-        raise HTTPException(404, "保存查询不存在")
+    sq = get_or_404(db, SavedQuery, sq_id, "保存查询不存在")
     for f in ("name", "sql_text", "params", "chart_config", "tags", "remark"):
         setattr(sq, f, getattr(body, f))
     db.commit()
@@ -124,9 +121,7 @@ def create_task(body: TaskIn, db: Session = Depends(get_db), user=Depends(get_cu
 @router.put("/scheduled-tasks/{task_id}")
 def update_task(task_id: int, body: TaskIn, db: Session = Depends(get_db),
                 user=Depends(get_current_user)):
-    t = db.query(ScheduledTask).get(task_id)
-    if not t:
-        raise HTTPException(404, "任务不存在")
+    t = get_or_404(db, ScheduledTask, task_id, "任务不存在")
     try:
         nxt = parse_cron(body.cron_expr)
     except Exception as exc:  # noqa: BLE001
@@ -146,17 +141,13 @@ def update_task(task_id: int, body: TaskIn, db: Session = Depends(get_db),
 def delete_task(task_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
     t = db.query(ScheduledTask).get(task_id)
     if t:
-        soft_delete_all(db.query(TaskRunLog).filter(TaskRunLog.task_id == task_id))
-        t.is_deleted = True
-        db.commit()
+        soft_delete(db, t, db.query(TaskRunLog).filter(TaskRunLog.task_id == task_id))
     return {"ok": True}
 
 
 @router.post("/scheduled-tasks/{task_id}/run")
 def run_now(task_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    t = db.query(ScheduledTask).get(task_id)
-    if not t:
-        raise HTTPException(404, "任务不存在")
+    t = get_or_404(db, ScheduledTask, task_id, "任务不存在")
     result = run_task(task_id)
     return result
 

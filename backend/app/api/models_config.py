@@ -7,6 +7,7 @@ from ..database import get_db
 from ..llm import LLMClient, LLMError
 from ..models import ModelConfig
 from ..security import aes_decrypt, aes_encrypt
+from .common import apply_fields, get_or_404, workspace_scope
 from .deps import get_current_user
 
 router = APIRouter(prefix="/models", tags=["models"])
@@ -35,8 +36,7 @@ def _out(m: ModelConfig) -> dict:
 
 @router.get("")
 def list_models(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    models = (db.query(ModelConfig)
-              .filter(ModelConfig.workspace_id == user.workspace_id).all())
+    models = workspace_scope(db, ModelConfig, user).all()
     return [_out(m) for m in models]
 
 
@@ -56,12 +56,9 @@ def create_model(body: ModelIn, db: Session = Depends(get_db), user=Depends(get_
 @router.put("/{model_id}")
 def update_model(model_id: int, body: ModelIn, db: Session = Depends(get_db),
                  user=Depends(get_current_user)):
-    m = db.query(ModelConfig).get(model_id)
-    if not m:
-        raise HTTPException(404, "模型不存在")
-    for f in ("name", "provider", "base_url", "model_name", "embedding_model",
-              "temperature", "top_p", "max_tokens", "scene", "is_default"):
-        setattr(m, f, getattr(body, f))
+    m = get_or_404(db, ModelConfig, model_id, "模型不存在")
+    apply_fields(m, body, ("name", "provider", "base_url", "model_name", "embedding_model",
+                           "temperature", "top_p", "max_tokens", "scene", "is_default"))
     if body.api_key:
         m.api_key_enc = aes_encrypt(body.api_key)
     db.commit()

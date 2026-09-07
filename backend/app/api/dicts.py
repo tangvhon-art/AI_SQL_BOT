@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import IntentDict, IntentTemplate
+from .common import get_owned_or_404, workspace_scope
 from .deps import get_current_user
 
 router = APIRouter(tags=["dicts"])
@@ -44,7 +45,7 @@ class IntentTemplateIn(BaseModel):
 @router.get("/dicts")
 def list_dicts(dict_type: str | None = None, db: Session = Depends(get_db),
                user=Depends(get_current_user)):
-    q = db.query(IntentDict).filter(IntentDict.workspace_id == user.workspace_id)
+    q = workspace_scope(db, IntentDict, user)
     if dict_type:
         q = q.filter(IntentDict.dict_type == dict_type)
     rows = q.order_by(IntentDict.dict_type, IntentDict.id.desc()).limit(500).all()
@@ -74,9 +75,7 @@ def create_dict(body: IntentDictIn, db: Session = Depends(get_db),
 @router.put("/dicts/{dict_id}")
 def update_dict(dict_id: int, body: IntentDictIn, db: Session = Depends(get_db),
                 user=Depends(get_current_user)):
-    d = db.query(IntentDict).get(dict_id)
-    if not d or d.workspace_id != user.workspace_id:
-        raise HTTPException(404, "词条不存在")
+    d = get_owned_or_404(db, IntentDict, dict_id, user, "词条不存在")
     d.dict_type = body.dict_type
     d.term = body.term.strip()
     d.aliases = body.aliases
@@ -92,9 +91,7 @@ def update_dict(dict_id: int, body: IntentDictIn, db: Session = Depends(get_db),
 @router.delete("/dicts/{dict_id}")
 def delete_dict(dict_id: int, db: Session = Depends(get_db),
                 user=Depends(get_current_user)):
-    d = db.query(IntentDict).get(dict_id)
-    if not d or d.workspace_id != user.workspace_id:
-        raise HTTPException(404, "词条不存在")
+    d = get_owned_or_404(db, IntentDict, dict_id, user, "词条不存在")
     db.delete(d)
     db.commit()
     return {"ok": True}

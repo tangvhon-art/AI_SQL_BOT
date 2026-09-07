@@ -1,14 +1,15 @@
 // 数据源管理：CRUD + 连接测试 + Schema 采集 + 进入 Schema 详情
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import {
- Button, Card, Drawer, Form, Input, Popconfirm, Space, Table, Tag, message,
+ Button, Card, Drawer, Form, Input, Popconfirm, Space, Table, Tag,
 } from 'antd'
 import { ApiOutlined, DatabaseOutlined, PlusOutlined, ReloadOutlined, ShareAltOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
-import { client, errMsg } from '../api/client'
+import { client } from '../api/client'
 import type { Datasource } from '../types'
 import PageHeader from '../components/PageHeader'
 import { GlassSelect } from '../ui'
+import { useCrudList } from '../hooks/useCrudList'
 
 const TYPE_OPTIONS = [
   { label: 'MySQL', value: 'mysql' },
@@ -18,24 +19,13 @@ const TYPE_OPTIONS = [
 ]
 
 export default function DatasourcePage() {
-  const [msgApi, ctx] = message.useMessage()
   const nav = useNavigate()
-  const [list, setList] = useState<Datasource[]>([])
+  const { data: list, load, msgApi, ctx, toastError } = useCrudList<Datasource>('/datasources')
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<Datasource | null>(null)
   const [form] = Form.useForm()
   const [testing, setTesting] = useState<number | null>(null)
   const [syncing, setSyncing] = useState<number | null>(null)
-
-  const load = async () => {
-    try {
-      const r = await client.get<Datasource[]>('/datasources')
-      setList(r.data)
-    } catch (e) {
-      msgApi.error(errMsg(e))
-    }
-  }
-  useEffect(() => { load() }, [])
 
   const openCreate = () => {
     setEditing(null)
@@ -66,7 +56,7 @@ export default function DatasourcePage() {
       setOpen(false)
       load()
     } catch (e) {
-      msgApi.error(errMsg(e))
+      toastError(e)
     }
   }
 
@@ -77,7 +67,7 @@ export default function DatasourcePage() {
       msgApi.success(r.data.ok ? '连接成功' : `连接失败：${r.data.message}`)
       load()
     } catch (e) {
-      msgApi.error(errMsg(e))
+      toastError(e)
     } finally {
       setTesting(null)
     }
@@ -91,7 +81,7 @@ export default function DatasourcePage() {
       msgApi.success(`采集完成：表 ${s.tables}，字段 ${s.columns}，外键关系 ${s.relationships}`)
       load()
     } catch (e) {
-      msgApi.error(errMsg(e))
+      toastError(e)
     } finally {
       setSyncing(null)
     }
@@ -103,7 +93,7 @@ export default function DatasourcePage() {
       msgApi.success('已删除')
       load()
     } catch (e) {
-      msgApi.error(errMsg(e))
+      toastError(e)
     }
   }
 

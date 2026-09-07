@@ -5,9 +5,10 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..database import get_db, session_scope, soft_delete_all
+from ..database import get_db, soft_delete_all
 from ..engine.rag import embed_doc_chunks, embed_faq, hybrid_search, split_chunks
 from ..models import DocChunk, FaqPair, KnowledgeDoc, SqlExample
+from .common import get_or_404, workspace_scope
 from .deps import get_current_user
 
 router = APIRouter(prefix="", tags=["knowledge"])
@@ -36,7 +37,7 @@ def _faq_out(f: FaqPair) -> dict:
 @router.get("/faqs")
 def list_faqs(q: str = "", category: str = "", db: Session = Depends(get_db),
               user=Depends(get_current_user)):
-    query = db.query(FaqPair).filter(FaqPair.workspace_id == user.workspace_id)
+    query = workspace_scope(db, FaqPair, user)
     if q:
         query = query.filter(FaqPair.question.like(f"%{q}%"))
     if category:
@@ -64,9 +65,7 @@ def create_faq(body: FaqIn, db: Session = Depends(get_db), user=Depends(get_curr
 @router.put("/faqs/{faq_id}")
 def update_faq(faq_id: int, body: FaqIn, db: Session = Depends(get_db),
                user=Depends(get_current_user)):
-    faq = db.query(FaqPair).get(faq_id)
-    if not faq:
-        raise HTTPException(404, "FAQ 不存在")
+    faq = get_or_404(db, FaqPair, faq_id, "FAQ 不存在")
     for k, v in body.model_dump().items():
         setattr(faq, k, v)
     db.commit()
@@ -87,8 +86,7 @@ def delete_faq(faq_id: int, db: Session = Depends(get_db), user=Depends(get_curr
 # ---------- 文档 ----------
 @router.get("/documents")
 def list_documents(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    docs = (db.query(KnowledgeDoc)
-            .filter(KnowledgeDoc.workspace_id == user.workspace_id)
+    docs = (workspace_scope(db, KnowledgeDoc, user)
             .order_by(KnowledgeDoc.id.desc()).all())
     return [{"id": d.id, "name": d.name, "file_type": d.file_type, "size": d.size,
              "status": d.status, "error_msg": d.error_msg, "version": d.version,

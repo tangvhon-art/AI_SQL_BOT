@@ -35,6 +35,7 @@ from ..executor import run_query, to_jsonable
 from ..llm import LLMClient, LLMError
 from ..models import (Conversation, ConversationMessage, FaqPair, QueryLog,
                       SavedQuery)
+from .common import get_or_404
 from .deps import get_current_user
 
 # 文件问答
@@ -88,29 +89,46 @@ def _load_prev_spec(db: Session, conv_id: int):
     return spec_from_dict((last.content_json or {}).get("query_spec"))
 
 
-def _doc_chat_event_stream(body: ChatIn, db: Session, user, ws_id: int):
-    """文件问答 SSE 生成器：创建会话 → 调用 doc_chat_stream → 包装事件 → 保存消息。"""
-    conv_id = body.conversation_id
-    history: list[dict] = []
+# ---------- 会话/审计公共方法（问数链路与文件问答链路共用） ----------
+def _ensure_conversation(db: Session, ws_id: int, user, question: str,
+                         conv_id: int | None) -> tuple[int, bool]:
+    """复用已有会话或新建会话；返回 (conversation_id, created)。"""
     if conv_id:
-        history = _load_history(db, conv_id)
-    else:
-        conv = Conversation(workspace_id=ws_id, user_id=user.id, title=body.question[:40])
-        db.add(conv)
-        db.commit()
-        db.refresh(conv)
-        conv_id = conv.id
+        return conv_id, False
+    conv = Conversation(workspace_id=ws_id, user_id=user.id, title=question[:40])
+    db.add(conv)
+    db.commit()
+    db.refresh(conv)
+    return conv.id, True
 
-    # 保存用户消息
+
+def _save_user_message(db: Session, conv_id: int, question: str) -> None:
+    """保存用户提问消息。"""
     db.add(ConversationMessage(conversation_id=conv_id, role="user",
                                content_type="text",
-                               content_json={"text": body.question}))
+                               content_json={"text": question}))
     db.commit()
 
+
+def _create_query_log(db: Session, ws_id: int, user, conv_id: int,
+                      question: str, intent: str = "nl2sql") -> QueryLog:
+    """创建问数审计日志（QueryLog）并返回。"""
     log = QueryLog(workspace_id=ws_id, user_id=user.id, conversation_id=conv_id,
-                   question=body.question, intent="doc_chat")
+                   question=question, intent=intent)
     db.add(log)
     db.commit()
+    db.refresh(log)
+    return log
+
+
+def _doc_chat_event_stream(body: ChatIn, db: Session, user, ws_id: int):
+    """文件问答 SSE 生成器：创建会话 → 调用 doc_chat_stream → 包装事件 → 保存消息。"""
+    conv_id, _created = _ensure_conversation(db, ws_id, user, body.question,
+                                             body.conversation_id)
+    history = _load_history(db, conv_id) if body.conversation_id else []
+
+    _save_user_message(db, conv_id, body.question)
+    log = _create_query_log(db, ws_id, user, conv_id, body.question, "doc_chat")
 
     # doc_session_id：优先前端传入，否则用 conv_id 构造
     doc_session_id = body.doc_session_id or f"doc_conv_{conv_id}"
@@ -179,29 +197,13 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
         )
 
     def event_stream():
-        conv_id = body.conversation_id
-        history = []
-        prev_spec = None
-        if conv_id:
-            history = _load_history(db, conv_id)
-            prev_spec = _load_prev_spec(db, conv_id)
-        else:
-            conv = Conversation(workspace_id=ws_id, user_id=user.id, title=body.question[:40])
-            db.add(conv)
-            db.commit()
-            db.refresh(conv)
-            conv_id = conv.id
+        conv_id, _created = _ensure_conversation(db, ws_id, user, body.question,
+                                                 body.conversation_id)
+        history = _load_history(db, conv_id) if body.conversation_id else []
+        prev_spec = _load_prev_spec(db, conv_id) if body.conversation_id else None
 
-        db.add(ConversationMessage(conversation_id=conv_id, role="user",
-                                   content_type="text",
-                                   content_json={"text": body.question}))
-        db.commit()
-
-        log = QueryLog(workspace_id=ws_id, user_id=user.id, conversation_id=conv_id,
-                       question=body.question, intent="nl2sql")
-        db.add(log)
-        db.commit()
-        db.refresh(log)
+        _save_user_message(db, conv_id, body.question)
+        log = _create_query_log(db, ws_id, user, conv_id, body.question, "nl2sql")
 
         start = time.time()
         try:
@@ -976,8 +978,8 @@ def list_conversations(db: Session = Depends(get_db), user=Depends(get_current_u
 
 @router.get("/conversations/{conv_id}/messages")
 def get_messages(conv_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    conv = db.query(Conversation).get(conv_id)
-    if not conv or conv.user_id != user.id:
+    conv = get_or_404(db, Conversation, conv_id, "会话不存在")
+    if conv.user_id != user.id:
         raise HTTPException(404, "会话不存在")
     rows = (db.query(ConversationMessage)
             .filter(ConversationMessage.conversation_id == conv_id)

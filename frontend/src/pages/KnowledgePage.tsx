@@ -1,38 +1,26 @@
 // 知识库：FAQ + 文档（上传→切片→向量化）+ 检索测试台
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import {
-  Button, Card, Drawer, Form, Input, Popconfirm, Space, Table, Tabs, Tag, Typography, Upload, message,
+  Button, Card, Drawer, Form, Input, Popconfirm, Space, Table, Tabs, Tag, Typography, Upload,
 } from 'antd'
 import { DeleteOutlined, PlusOutlined, SearchOutlined, UploadOutlined } from '@ant-design/icons'
 import type { UploadProps } from 'antd'
-import { client, errMsg } from '../api/client'
+import { client } from '../api/client'
 import type { Faq, KnowledgeDoc } from '../types'
 import PageHeader from '../components/PageHeader'
+import { useCrudList } from '../hooks/useCrudList'
 
 export default function KnowledgePage() {
-  const [msgApi, ctx] = message.useMessage()
-  const [faqs, setFaqs] = useState<Faq[]>([])
-  const [docs, setDocs] = useState<KnowledgeDoc[]>([])
+  const faqsHook = useCrudList<Faq>('/faqs')
+  const docsHook = useCrudList<KnowledgeDoc>('/documents')
+  const { data: faqs, load: loadFaqs, msgApi, toastError } = faqsHook
+  const { data: docs, load: loadDocs } = docsHook
   const [faqOpen, setFaqOpen] = useState(false)
   const [editing, setEditing] = useState<Faq | null>(null)
   const [form] = Form.useForm()
   const [retrieveQ, setRetrieveQ] = useState('')
   const [retrieveKind, setRetrieveKind] = useState<'doc' | 'faq'>('doc')
   const [retrieveHits, setRetrieveHits] = useState<Array<{ id: string; score: number; meta: Record<string, unknown>; content?: string }>>([])
-
-  const loadFaqs = async () => {
-    try {
-      const r = await client.get<Faq[]>('/faqs')
-      setFaqs(r.data)
-    } catch (e) { msgApi.error(errMsg(e)) }
-  }
-  const loadDocs = async () => {
-    try {
-      const r = await client.get<KnowledgeDoc[]>('/documents')
-      setDocs(r.data)
-    } catch (e) { msgApi.error(errMsg(e)) }
-  }
-  useEffect(() => { loadFaqs(); loadDocs() }, [])
 
   const openCreate = () => { setEditing(null); form.resetFields(); setFaqOpen(true) }
   const openEdit = (f: Faq) => { setEditing(f); form.setFieldsValue(f); setFaqOpen(true) }
@@ -45,7 +33,7 @@ export default function KnowledgePage() {
       msgApi.success('已保存（自动向量化）')
       setFaqOpen(false)
       loadFaqs()
-    } catch (e) { msgApi.error(errMsg(e)) }
+    } catch (e) { toastError(e) }
   }
 
   const uploadProps: UploadProps = {
@@ -60,7 +48,7 @@ export default function KnowledgePage() {
         onSuccess?.(r.data)
         loadDocs()
       } catch (e) {
-        msgApi.error(errMsg(e))
+        toastError(e)
         onError?.(e as Error)
       }
     },
@@ -71,7 +59,7 @@ export default function KnowledgePage() {
     try {
       const r = await client.post('/knowledge/retrieve-test', { query: retrieveQ, kind: retrieveKind, top_k: 5 })
       setRetrieveHits(r.data.hits)
-    } catch (e) { msgApi.error(errMsg(e)) }
+    } catch (e) { toastError(e) }
   }
 
   return (
@@ -81,7 +69,7 @@ export default function KnowledgePage() {
         description="FAQ 与文档切片向量化，问数时混合检索注入 few-shot 提示，越问越准"
       />
       <Card styles={{ header: { display: 'none' } }}>
-      {ctx}
+      {faqsHook.ctx}{docsHook.ctx}
       <Tabs
         items={[
           {
@@ -115,8 +103,7 @@ export default function KnowledgePage() {
                           <Button size="small" onClick={() => openEdit(r)}>编辑</Button>
                           <Popconfirm title="删除该 FAQ？" onConfirm={async () => {
                             await client.delete(`/faqs/${r.id}`); loadFaqs()
-                          }}>
-                            <Button size="small" danger icon={<DeleteOutlined />} />
+                          }}>                            <Button size="small" danger icon={<DeleteOutlined />} />
                           </Popconfirm>
                         </Space>
                       ),

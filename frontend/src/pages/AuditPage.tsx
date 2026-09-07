@@ -2,25 +2,20 @@
 import { useEffect, useState } from 'react'
 import { Button, Card, Input, Space, Table, Tag } from 'antd'
 import { SearchOutlined } from '@ant-design/icons'
-import { client } from '../api/client'
 import type { QueryLog } from '../types'
 import PageHeader from '../components/PageHeader'
 import { GlassSelect } from '../ui'
+import { useCrudList } from '../hooks/useCrudList'
 
 export default function AuditPage() {
-  const [list, setList] = useState<QueryLog[]>([])
+  const { data: list, load, ctx } = useCrudList<QueryLog>('', false, { silent: true })
   const [question, setQuestion] = useState('')
   const [injected, setInjected] = useState<string>('')
 
-  const load = async () => {
-    try {
-      const r = await client.get<QueryLog[]>('/query-logs', {
-        params: { question: question || undefined, injected: injected || undefined, limit: 100 },
-      })
-      setList(r.data)
-    } catch { /* 忽略 */ }
-  }
-  useEffect(() => { load() }, [])
+  const doQuery = () => load('/query-logs', {
+    params: { question: question || undefined, injected: injected || undefined, limit: 100 },
+  })
+  useEffect(() => { doQuery() }, [])
 
   return (
     <div className="glass-page">
@@ -39,7 +34,7 @@ export default function AuditPage() {
           style={{ width: 140 }}
           options={[{ label: '1=1（全可查）', value: '1=1' }, { label: '1=2（含受限字段）', value: '1=2' }]}
         />
-        <Button type="primary" icon={<SearchOutlined />} onClick={load}>查询</Button>
+        <Button type="primary" icon={<SearchOutlined />} onClick={doQuery}>查询</Button>
       </Space>
       <Table
         rowKey="id"

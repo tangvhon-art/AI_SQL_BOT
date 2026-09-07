@@ -1,13 +1,15 @@
 // 角色管理：角色 CRUD + 分配用户 / 分配用户组 / 分配菜单（权限口径：用户角色∪用户组角色）
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
-  Card, Drawer, Form, Input, Popconfirm, Space, Table, Tag, Tree, message,
+  Card, Drawer, Form, Input, Popconfirm, Space, Table, Tag, Tree,
 } from 'antd'
 import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons'
-import { client, errMsg } from '../api/client'
+import { client } from '../api/client'
 import type { MenuItem } from '../types'
 import PageHeader from '../components/PageHeader'
 import { DefaultButton, GlassSelect, PrimaryButton, TabSwitch } from '../ui'
+import { useCrudList } from '../hooks/useCrudList'
+import { useOptions } from '../hooks/useOptions'
 
 interface RoleRow {
   id: number
@@ -22,11 +24,10 @@ interface UserRow { id: number; username: string; display_name: string }
 interface GroupRow { id: number; name: string }
 
 export default function RolePage() {
-  const [msgApi, ctx] = message.useMessage()
-  const [roles, setRoles] = useState<RoleRow[]>([])
-  const [users, setUsers] = useState<UserRow[]>([])
-  const [groups, setGroups] = useState<GroupRow[]>([])
-  const [menus, setMenus] = useState<MenuItem[]>([])
+  const { data: roles, load: loadRoles, msgApi, ctx, toastError } = useCrudList<RoleRow>('/roles')
+  const users = useOptions<UserRow>('users')
+  const groups = useOptions<GroupRow>('user-groups')
+  const menus = useOptions<MenuItem>('menus')
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<RoleRow | null>(null)
   const [assigning, setAssigning] = useState<RoleRow | null>(null)
@@ -34,19 +35,6 @@ export default function RolePage() {
   const [assignIds, setAssignIds] = useState<number[]>([])
   const [savingAssign, setSavingAssign] = useState(false)
   const [form] = Form.useForm()
-
-  const load = async () => {
-    try {
-      const r = await client.get<RoleRow[]>('/roles')
-      setRoles(r.data)
-    } catch (e) { msgApi.error(errMsg(e)) }
-  }
-  useEffect(() => {
-    load()
-    client.get<UserRow[]>('/users').then((r) => setUsers(r.data)).catch(() => {})
-    client.get<GroupRow[]>('/user-groups').then((r) => setGroups(r.data)).catch(() => {})
-    client.get<MenuItem[]>('/menus').then((r) => setMenus(r.data)).catch(() => {})
-  }, [])
 
   // 扁平菜单 → 两级树（parent_id=0 为根；分组节点下挂子菜单）
   const menuTreeData = useMemo(() => {
@@ -83,15 +71,15 @@ export default function RolePage() {
       else await client.post('/roles', v)
       msgApi.success('已保存')
       setOpen(false)
-      load()
-    } catch (e) { if (typeof e === 'object' && e && 'errorFields' in e) return; msgApi.error(errMsg(e)) }
+      loadRoles()
+    } catch (e) { if (typeof e === 'object' && e && 'errorFields' in e) return; toastError(e) }
   }
   const remove = async (r: RoleRow) => {
     try {
       await client.delete(`/roles/${r.id}`)
       msgApi.success('已删除')
-      load()
-    } catch (e) { msgApi.error(errMsg(e)) }
+      loadRoles()
+    } catch (e) { toastError(e) }
   }
 
   const openAssign = (r: RoleRow, tab: 'users' | 'groups' | 'menus') => {
@@ -106,8 +94,8 @@ export default function RolePage() {
       await client.put(`/roles/${assigning.id}/${assignTab}`, { ids: assignIds })
       msgApi.success('分配已保存（角色权限取并集）')
       setAssigning(null)
-      load()
-    } catch (e) { msgApi.error(errMsg(e)) }
+      loadRoles()
+    } catch (e) { toastError(e) }
     finally { setSavingAssign(false) }
   }
 

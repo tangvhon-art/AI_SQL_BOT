@@ -1,7 +1,7 @@
 // 对话页（豆包式全屏聊天）：历史收起到抽屉、消息流居中、底部多行输入、发送后追加到底部
 import { useEffect, useRef, useState } from 'react'
 import {
- Button, Drawer, Dropdown, Input, List, Space, Spin, Tag, Tooltip, Typography, message,
+ Button, Drawer, Dropdown, Input, List, Space, Spin, Tag, Tooltip, Typography,
 } from 'antd'
 import {
   HistoryOutlined, PlusOutlined, ArrowUpOutlined, DownOutlined,
@@ -12,12 +12,13 @@ import { useChatStore } from '../stores/chat'
 import MessageCard from '../components/MessageCard'
 import type { ChatMsg, Conversation, Datasource } from '../types'
 import { GlassSelect } from '../ui'
+import { useMessageApi } from '../hooks/useMessageApi'
 
 // 问数节点步骤：按后端 progress 动态展示（意图识别/知识检索/SQL 链路均逐节点显示）
 interface StepState { label: string; done: boolean; active: boolean }
 
 export default function ChatPage() {
-  const [msgApi, ctx] = message.useMessage()
+  const { msgApi, ctx, toastError } = useMessageApi()
   const [steps, setSteps] = useState<StepState[]>([])
   const [question, setQuestion] = useState('')
   const [dsList, setDsList] = useState<Datasource[]>([])
@@ -71,13 +72,8 @@ export default function ChatPage() {
     Array.from(files).forEach((f) => formData.append('files', f))
     formData.append('session_id', sid)
     try {
-      const token = localStorage.getItem('ai_sql_bot_token')
-      const resp = await fetch('/api/v1/doc-chat/upload', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token ?? ''}` },
-        body: formData,
-      })
-      const data = await resp.json()
+      const r = await client.post('/doc-chat/upload', formData)
+      const data = r.data
       const uploaded: DocFile[] = (data.files || []).filter((f: DocFile) => f.file_id)
       if (uploaded.length > 0) {
         setDocFiles((prev) => [...prev, ...uploaded])
@@ -107,15 +103,11 @@ export default function ChatPage() {
         return prev
       })
       try {
-        const token = localStorage.getItem('ai_sql_bot_token')
         const currentFiles = docFilesRef.current
         const ids = currentFiles.filter((f) => f.status === 'parsing' || f.status === 'pending').map((f) => f.file_id).join(',')
         if (!ids) return
-        const resp = await fetch(`/api/v1/doc-chat/status?session_id=${sid}&file_ids=${ids}`, {
-          headers: { Authorization: `Bearer ${token ?? ''}` },
-        })
-        const data = await resp.json()
-        const statusMap = new Map<string, DocFile>((data.files || []).map((f: DocFile) => [f.file_id, f]))
+        const r = await client.get('/doc-chat/status', { params: { session_id: sid, file_ids: ids } })
+        const statusMap = new Map<string, DocFile>((r.data.files || []).map((f: DocFile) => [f.file_id, f]))
         setDocFiles((prev) => prev.map((f) => statusMap.get(f.file_id) || f))
       } catch { /* 忽略轮询错误 */ }
     }, 1500)
@@ -130,11 +122,7 @@ export default function ChatPage() {
     setDocFiles((prev) => prev.filter((f) => f.file_id !== fileId))
     if (sid) {
       try {
-        const token = localStorage.getItem('ai_sql_bot_token')
-        await fetch(`/api/v1/doc-chat/${fileId}?session_id=${sid}`, {
-          method: 'DELETE',
-          headers: { Authorization: `Bearer ${token ?? ''}` },
-        })
+        await client.delete(`/doc-chat/${fileId}`, { params: { session_id: sid } })
       } catch { /* 忽略 */ }
     }
   }
@@ -207,7 +195,7 @@ export default function ChatPage() {
       const r = await client.get<ChatMsg[]>(`/conversations/${id}/messages`)
       setMessages(r.data)
     } catch (e) {
-      msgApi.error(errMsg(e))
+      toastError(e)
     }
   }
 
@@ -250,17 +238,15 @@ export default function ChatPage() {
     setSteps([])
     const partial: ChatMsg = { role: 'assistant', content_type: 'progress', content: { msg: '' } }
     appendStreamMsg(partial)
+    // 公共方法：合并更新最后一条 assistant 消息（content 深度合并，供 SSE 各事件分片写入）
     const update = (patch: Partial<ChatMsg>) => {
-      useChatStore.setState((s) => {
-        const list = [...s.messages]
-        const idx = list.length - 1
-        const prev = list[idx]
-        // content 必须合并：SQL/表格/图表/文字说明由不同事件分片写入
-        const prevContent = (prev?.content ?? {}) as Record<string, unknown>
-        const newContent = { ...prevContent, ...((patch.content as Record<string, unknown>) ?? {}) }
-        list[idx] = { ...prev, ...patch, content: newContent }
-        return { messages: list }
-      })
+      const idx = useChatStore.getState().messages.length - 1
+      useChatStore.getState().patchMessage(idx, patch)
+    }
+    // 公共方法：向最后一条消息的 content[key] 追加增量文本（打字机/思考流/回答流）
+    const appendDelta = (key: string, delta: string) => {
+      const idx = useChatStore.getState().messages.length - 1
+      useChatStore.getState().appendDelta(idx, key, delta)
     }
     try {
       await postChatStream(
@@ -277,39 +263,16 @@ export default function ChatPage() {
           },
           onStream: (delta) => {
             // 流式输出：逐块追加到当前 assistant 消息的 stream_text（打字机效果）
-            useChatStore.setState((s) => {
-              const list = [...s.messages]
-              const idx = list.length - 1
-              const prev = list[idx]
-              if (!prev) return s
-              const prevContent = (prev.content ?? {}) as Record<string, unknown>
-              list[idx] = { ...prev, content: { ...prevContent, stream_text: String(prevContent.stream_text ?? '') + delta } }
-              return { messages: list }
-            })
+            appendDelta('stream_text', delta)
           },
           onThinking: (delta) => {
             // 思考过程：逐块追加到当前消息的 thinking_text（最终回答时可折叠展示）
-            useChatStore.setState((s) => {
-              const list = [...s.messages]
-              const idx = list.length - 1
-              const prev = list[idx]
-              if (!prev) return s
-              const prevContent = (prev.content ?? {}) as Record<string, unknown>
-              list[idx] = { ...prev, content: { ...prevContent, thinking_text: String(prevContent.thinking_text ?? '') + delta } }
-              return { messages: list }
-            })
+            appendDelta('thinking_text', delta)
           },
           onAnswer: (delta) => {
             // 文件问答：流式累积回答文本到 content.text
-            useChatStore.setState((s) => {
-              const list = [...s.messages]
-              const idx = list.length - 1
-              const prev = list[idx]
-              if (!prev) return s
-              const prevContent = (prev.content ?? {}) as Record<string, unknown>
-              list[idx] = { ...prev, content_type: 'result', content: { ...prevContent, text: String(prevContent.text ?? '') + delta, mode: 'doc_chat' } }
-              return { messages: list }
-            })
+            appendDelta('text', delta)
+            update({ content_type: 'result', content: { mode: 'doc_chat' } as never })
           },
           onReferences: (refs) => {
             update({ content_type: 'result', content: { references: refs, mode: 'doc_chat' } as never })
@@ -390,7 +353,7 @@ export default function ChatPage() {
       })
       msgApi.success('已保存，可在「保存查询」中复用')
     } catch (e) {
-      msgApi.error(errMsg(e))
+      toastError(e)
     }
   }
 
