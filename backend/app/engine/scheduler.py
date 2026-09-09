@@ -120,6 +120,32 @@ def run_task(task_id: int) -> dict:
         db.close()
 
 
+def _mine_lineage_all() -> None:
+    """对所有正常数据源执行血缘挖掘（QueryLog 关联边 + 视图 DDL 边）。"""
+    from ..engine.lineage import mine_query_logs, mine_view_ddl
+    from ..models import Datasource
+
+    db = SessionLocal()
+    try:
+        ds_list = (db.query(Datasource)
+                   .filter(Datasource.status == "ok").all())
+    finally:
+        db.close()
+    for ds in ds_list:
+        try:
+            n = mine_query_logs(ds.id)
+            if n:
+                logger.info("[lineage] ds=%s QueryLog 边 %d", ds.id, n)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[lineage] ds=%s query 挖掘失败: %s", ds.id, exc)
+        try:
+            n = mine_view_ddl(ds.id)
+            if n:
+                logger.info("[lineage] ds=%s 视图边 %d", ds.id, n)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[lineage] ds=%s ddl 挖掘失败: %s", ds.id, exc)
+
+
 def _datasource_id_of(sql: str) -> int:
     """从 SQL 中提取表名并反查数据源（简化：取第一张表）。"""
     from ..engine.nl2sql import retrieve_candidate_tables  # noqa: F401
@@ -138,11 +164,12 @@ def _datasource_id_of(sql: str) -> int:
 
 
 class SchedulerThread(threading.Thread):
-    """单机后台调度线程：每 30s 扫描到期任务。"""
+    """单机后台调度线程：每 30s 扫描到期任务；每间隔周期跑能力补建后台任务（C8 血缘挖掘）。"""
 
     def __init__(self):
         super().__init__(daemon=True)
         self._stop = threading.Event()
+        self._last_lineage_mine = 0.0
 
     def run(self):
         while not self._stop.is_set():
@@ -168,6 +195,16 @@ class SchedulerThread(threading.Thread):
                             db.commit()
                 finally:
                     db.close()
+                # C8 血缘定时挖掘（每 lineage_ddl_interval_min 分钟，含 QueryLog 与视图 DDL）
+                try:
+                    from ..config import get_settings
+                    s = get_settings()
+                    if s.lineage_collect_enabled and \
+                            time.time() - self._last_lineage_mine >= s.lineage_ddl_interval_min * 60:
+                        _mine_lineage_all()
+                        self._last_lineage_mine = time.time()
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("血缘挖掘失败: %s", exc)
             except Exception as exc:  # noqa: BLE001
                 logger.error("调度循环异常: %s", exc)
             self._stop.wait(30)

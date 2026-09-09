@@ -181,6 +181,15 @@ def _schema_text(datasource_id: int, top_tables: list[TableMeta] | None = None,
                 type_or_comment = "·".join(x for x in (c.data_type, c.comment) if x)
                 if type_or_comment:
                     seg += f"({type_or_comment})"
+                # C7 样例值注入：低基数字段追加 <样例值>，帮助 LLM 使用准确枚举值
+                try:
+                    samples = (c.samples_json or [])[:3]
+                except Exception:  # noqa: BLE001
+                    samples = []
+                vals = " / ".join(str(s.get("value")) for s in samples
+                                  if s and s.get("value") is not None)
+                if vals:
+                    seg += f"<{vals}>"
                 if c.column_name in preferred:
                     seg = f"★{seg}"  # spec 已映射/检索命中的目标字段，优先使用
                 parts.append(seg)

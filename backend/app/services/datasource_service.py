@@ -40,6 +40,90 @@ def build_url(ds: Datasource) -> str:
     return f"{scheme}://{user}:{pwd}@{ds.host}:{ds.port}/{ds.db_name}"
 
 
+_SKIP_SAMPLE_DTYPES = frozenset({
+    "text", "longtext", "mediumtext", "tinytext", "blob", "longblob",
+    "mediumblob", "tinyblob", "json", "geometry", "point", "linestring",
+    "polygon", "date", "datetime", "timestamp", "time",
+})
+
+
+def _collect_column_samples(conn, db, ds: Datasource, table_map: dict) -> int:
+    """对低基数字段采集 top-N 样例值（C7）。
+    仅 MySQL/PostgreSQL；表行数 < sample_min_rows 跳过；单列查询超时 3s 跳过；
+    表名/列名仅允许 [A-Za-z0-9_$]（防注入）。返回采集字段数。"""
+    from ..config import get_settings
+    from ..models import ColumnSample
+
+    settings = get_settings()
+    if not settings.schema_sync_collect_samples or ds.type not in ("mysql", "postgresql"):
+        return 0
+    import re as _re
+
+    q = "`" if ds.type == "mysql" else '"'
+    timeout_ms = int(settings.schema_sync_sample_timeout_s * 1000)
+    limit = settings.schema_sync_sample_per_column
+    if ds.type == "mysql":
+        conn.exec_driver_sql(f"SET SESSION MAX_EXECUTION_TIME = {timeout_ms}")
+    collected = 0
+    try:
+        for tm in table_map.values():
+            if str(tm.table_type).upper() != "BASE TABLE":
+                continue
+            tname = tm.table_name
+            if not _re.fullmatch(r"[A-Za-z0-9_$]+", tname):
+                continue
+            # 行数估算：不足 min_rows 的表不采集
+            try:
+                if ds.type == "mysql":
+                    est = conn.execute(text(
+                        "SELECT TABLE_ROWS FROM information_schema.TABLES "
+                        "WHERE TABLE_SCHEMA = :s AND TABLE_NAME = :t"
+                    ), {"s": ds.db_name, "t": tname}).scalar()
+                else:
+                    est = conn.execute(text(
+                        "SELECT c.reltuples::bigint FROM pg_class c "
+                        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                        "WHERE n.nspname = :s AND c.relname = :t"
+                    ), {"s": "public", "t": tname}).scalar()
+                if est is not None and est < settings.schema_sync_sample_min_rows:
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+            cols = (db.query(ColumnMeta)
+                    .filter(ColumnMeta.table_meta_id == tm.id)
+                    .order_by(ColumnMeta.ordinal.asc()).all())
+            for col in cols:
+                cname = col.column_name
+                if col.is_pk or not cname or not _re.fullmatch(r"[A-Za-z0-9_$]+", cname):
+                    continue
+                if (col.data_type or "").lower() in _SKIP_SAMPLE_DTYPES:
+                    continue
+                try:
+                    sql = (f"SELECT {q}{cname}{q} AS v, COUNT(*) AS c FROM {q}{tname}{q} "
+                           f"GROUP BY {q}{cname}{q} ORDER BY c DESC LIMIT {limit}")
+                    rows = conn.execute(text(sql)).fetchall()
+                except Exception:  # noqa: BLE001  （超时/权限不足/类型不支持 → 跳过该列）
+                    continue
+                if not rows:
+                    continue
+                samples = [{"value": str(v)[:128], "freq": int(f or 0)} for v, f in rows]
+                col.samples_json = samples
+                db.query(ColumnSample).filter(
+                    ColumnSample.column_meta_id == col.id).delete()
+                for s in samples:
+                    db.add(ColumnSample(column_meta_id=col.id,
+                                        sample_value=s["value"], freq=s["freq"],
+                                        sample_type="top"))
+                collected += 1
+    finally:
+        if ds.type == "mysql":
+            try:
+                conn.exec_driver_sql("SET SESSION MAX_EXECUTION_TIME = 0")
+            except Exception:  # noqa: BLE001
+                pass
+    return collected
+
+
 def test_connection(ds: Datasource) -> tuple[bool, str]:
     """测试连接；成功返回 (True, "ok")。"""
     try:
@@ -137,6 +221,13 @@ def sync_schema(ds: Datasource) -> dict:
                 # 字段统计回写（表字段数持久化）
                 for tm in table_map.values():
                     tm.column_count = col_count.get(tm.id, 0)
+
+                # C7 样例值采集（低基数字段 top-N，statement timeout 保护，MySQL/PostgreSQL）
+                try:
+                    stats["samples"] = _collect_column_samples(conn, db, ds, table_map)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("样例值采集失败（不影响 Schema 采集）: %s", exc)
+                    stats["samples"] = 0
 
                 # 3) 外键关系（关系图信息）—— MySQL/PostgreSQL 双适配 + 容错
                 fk_rows = []
@@ -350,6 +441,13 @@ def sync_schema(ds: Datasource) -> dict:
                 ds.status = "ok"
                 ds.last_sync_at = datetime.utcnow()
                 db.commit()
+                # C1 缓存失效：Schema 已变化，清空该数据源生成/结果缓存
+                from ..engine.cache_manager import invalidate_for_datasource
+                try:
+                    invalidate_for_datasource(ds.id, db)
+                    db.commit()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[cache] schema 同步后缓存失效失败: %s", exc)
             finally:
                 db.close()
         return stats

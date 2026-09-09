@@ -273,9 +273,37 @@ def _migrate_meta_tables() -> None:
                     ("clarify_count", "INT NOT NULL DEFAULT 0 COMMENT '澄清轮数'"),
                     ("fallback", "TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '是否降级模式'"),
                     ("summary_sections_json", "JSON NULL COMMENT '四层结论快照'"),
+                    # 能力补建扩展（C1/C2/C6/C8/C11/C14）
+                    ("cache_hit", "TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '是否命中缓存'"),
+                    ("cache_key", "VARCHAR(128) NOT NULL DEFAULT '' COMMENT '命中的缓存键'"),
+                    ("cost_estimate_json", "JSON NULL COMMENT '成本预估明细'"),
+                    ("cost_warning", "TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '成本预警标记'"),
+                    ("timeout", "TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '是否执行超时'"),
+                    ("limited", "TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '是否被限流'"),
+                    ("candidates_json", "JSON NULL COMMENT '多候选评分与选中顺序'"),
+                    ("scene_code", "VARCHAR(32) NOT NULL DEFAULT '' COMMENT '命中的场景编码'"),
+                    ("row_rule_summary", "VARCHAR(256) NOT NULL DEFAULT '' COMMENT '行级注入摘要'"),
                 ):
                     if col_name not in cols:
                         conn.exec_driver_sql(f"ALTER TABLE `{name}` ADD COLUMN `{col_name}` {ddl}")
+
+            # 9) permission_rule 行级权限扩展（C3）
+            if name == "permission_rule":
+                for col_name, ddl in (
+                    ("row_filter", "TEXT NULL COMMENT '行过滤条件（SQL条件文本或模板文本）'"),
+                    ("row_filter_type", "VARCHAR(8) NOT NULL DEFAULT 'sql' COMMENT '行过滤类型 sql/template'"),
+                    ("row_filter_note", "VARCHAR(256) NOT NULL DEFAULT '' COMMENT '行过滤说明'"),
+                    ("row_enabled", "TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '行级规则是否启用'"),
+                ):
+                    if col_name not in cols:
+                        conn.exec_driver_sql(f"ALTER TABLE `{name}` ADD COLUMN `{col_name}` {ddl}")
+
+            # 10) column_meta 样例值冗余字段（C7）
+            if name == "column_meta":
+                if "samples_json" not in cols:
+                    conn.exec_driver_sql(
+                        f"ALTER TABLE `{name}` ADD COLUMN `samples_json` "
+                        "JSON NULL COMMENT '样例值冗余（column_sample 表为主）'")
         # 恢复外键检查
         conn.exec_driver_sql("SET FOREIGN_KEY_CHECKS = 1")
 

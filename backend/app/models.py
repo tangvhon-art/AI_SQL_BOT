@@ -10,8 +10,10 @@ from sqlalchemy.dialects import mysql
 
 from .database import Base
 
-# 主键：MySQL 生成 BIGINT UNSIGNED 自增；SQLite 降级为 INTEGER
-BIGINT_UID = BigInteger().with_variant(mysql.BIGINT(unsigned=True), "mysql")
+# 主键：MySQL 生成 BIGINT UNSIGNED 自增；SQLite 降级为 INTEGER（INTEGER PRIMARY KEY 才是 rowid 自增）
+BIGINT_UID = (BigInteger()
+              .with_variant(mysql.BIGINT(unsigned=True), "mysql")
+              .with_variant(Integer(), "sqlite"))
 
 
 class AuditMixin:
@@ -160,6 +162,7 @@ class ColumnMeta(Base, AuditMixin):
     is_pk = Column(Boolean, default=False, comment="是否主键")
     ordinal = Column(Integer, default=0, comment="字段序号")
     default_value = Column(String(255), default="", comment="默认值")
+    samples_json = Column(JSON, default=list, comment="样例值冗余（column_sample 表为主）")
 
 
 class Relationship(Base, AuditMixin):
@@ -292,6 +295,16 @@ class QueryLog(Base, AuditMixin):
     clarify_count = Column(Integer, default=0, comment="澄清轮数")
     fallback = Column(Boolean, default=False, comment="是否降级模式")
     summary_sections_json = Column(JSON, default=dict, comment="四层结论快照")
+    # 能力补建扩展字段（缓存/成本/超时/多候选/场景/行级权限）
+    cache_hit = Column(Boolean, default=False, comment="是否命中缓存")
+    cache_key = Column(String(128), default="", comment="命中的缓存键")
+    cost_estimate_json = Column(JSON, default=dict, comment="成本预估明细")
+    cost_warning = Column(Boolean, default=False, comment="成本预警标记")
+    timeout = Column(Boolean, default=False, comment="是否执行超时")
+    limited = Column(Boolean, default=False, comment="是否被限流")
+    candidates_json = Column(JSON, default=list, comment="多候选评分与选中顺序")
+    scene_code = Column(String(32), default="", comment="命中的场景编码")
+    row_rule_summary = Column(String(256), default="", comment="行级注入摘要")
 
 
 # ---------- 结果复用与定时任务 ----------
@@ -347,6 +360,11 @@ class PermissionRule(Base, AuditMixin):
     table_id = Column(BigInteger, nullable=False, comment="表ID")
     column_ids = Column(JSON, default=list, comment="字段ID数组，空数组=整表规则")
     enabled = Column(Boolean, default=True, comment="是否启用")
+    # 行级权限扩展（C3）：row_enabled=false 时行为与旧版一致
+    row_filter = Column(Text, nullable=True, comment="行过滤条件（SQL 条件文本或模板文本）")
+    row_filter_type = Column(String(8), default="sql", comment="行过滤类型 sql/template")
+    row_filter_note = Column(String(256), default="", comment="行过滤说明（审计展示）")
+    row_enabled = Column(Boolean, default=False, comment="行级规则是否启用")
 
 
 # ---------- 意图识别词典与句式模板（AI 问数重构：L2 意图理解层配置化） ----------
@@ -373,3 +391,124 @@ class IntentTemplate(Base, AuditMixin):
     slot_map = Column(JSON, default=dict, comment="占位符→要素映射")
     priority = Column(Integer, default=0, comment="优先级")
     enabled = Column(Boolean, default=True, comment="是否启用")
+
+
+# ---------- 能力补建（C1/C4/C7/C8/C14）新增表 ----------
+class CacheEntry(Base, AuditMixin):
+    """SQL/结果缓存条目（C1）：一级生成缓存（相似问句）+ 二级结果缓存（SQL 指纹）。"""
+    __tablename__ = "cache_entry"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "cache_type", "cache_key"),
+        {"comment": "缓存条目表"},
+    )
+    workspace_id = Column(BigInteger, nullable=False, comment="工作空间ID")
+    cache_type = Column(String(8), nullable=False, comment="缓存类型 gen/result")
+    cache_key = Column(String(128), nullable=False, comment="缓存键（相似问句键/SQL指纹）")
+    question = Column(String(512), default="", comment="原问题（一级缓存展示用）")
+    sql_fingerprint = Column(String(64), default="", comment="SQL指纹（二级缓存）")
+    sql_text = Column(Text, default="", comment="生成/执行的SQL")
+    datasource_id = Column(BigInteger, default=0, comment="关联数据源ID（失效用）")
+    payload_json = Column(JSON, default=dict, comment="生成结果/结果集")
+    schema_version = Column(DateTime, nullable=True, comment="生成时Schema版本（synced_at）")
+    hit_count = Column(Integer, default=0, comment="命中次数")
+    last_hit_at = Column(DateTime, nullable=True, comment="最近命中时间")
+    expires_at = Column(DateTime, nullable=True, comment="过期时间")
+
+
+class EvalCase(Base, AuditMixin):
+    """评测用例（C4）：问题 + 期望结果。"""
+    __tablename__ = "eval_case"
+    __table_args__ = {"comment": "评测用例表"}
+    workspace_id = Column(BigInteger, nullable=False, comment="工作空间ID")
+    datasource_id = Column(BigInteger, nullable=False, comment="数据源ID")
+    question = Column(String(512), nullable=False, comment="问题")
+    expect_tables_json = Column(JSON, default=list, comment="期望表集合")
+    expect_metrics_json = Column(JSON, default=list, comment="期望指标列表")
+    expect_filters_json = Column(JSON, default=list, comment="期望过滤条件列表")
+    expect_sql = Column(Text, default="", comment="期望SQL（可选）")
+    scene_code = Column(String(32), default="", comment="场景编码（与C14联动）")
+    tags = Column(String(255), default="", comment="标签（逗号分隔）")
+    status = Column(String(16), default="active", comment="状态 active/disabled")
+    created_by = Column(BigInteger, default=0, comment="创建人ID")
+
+
+class EvalRun(Base, AuditMixin):
+    """评测批次（C4）：一次评测执行的汇总与指标。"""
+    __tablename__ = "eval_run"
+    __table_args__ = {"comment": "评测批次表"}
+    workspace_id = Column(BigInteger, nullable=False, comment="工作空间ID")
+    name = Column(String(128), default="", comment="批次名称")
+    scope_json = Column(JSON, default=dict, comment="范围（数据源/标签/用例ID列表）")
+    status = Column(String(16), default="running", comment="状态 running/success/failed")
+    mock_execute = Column(Boolean, default=True, comment="是否mock执行（不真实连库）")
+    total = Column(Integer, default=0, comment="用例总数")
+    metrics_json = Column(JSON, default=dict, comment="汇总指标（命中率/正确率等）")
+    started_at = Column(DateTime, nullable=True, comment="开始时间")
+    finished_at = Column(DateTime, nullable=True, comment="结束时间")
+    created_by = Column(BigInteger, default=0, comment="创建人ID")
+
+
+class EvalResult(Base, AuditMixin):
+    """评测明细（C4）：单用例判定结果。"""
+    __tablename__ = "eval_result"
+    __table_args__ = {"comment": "评测结果明细表"}
+    run_id = Column(BigInteger, nullable=False, comment="评测批次ID")
+    case_id = Column(BigInteger, nullable=False, comment="评测用例ID")
+    intent_ok = Column(Boolean, default=False, comment="意图是否正确")
+    tables_hit = Column(Boolean, default=False, comment="期望表是否命中")
+    sql_generated = Column(Boolean, default=False, comment="是否生成SQL")
+    sql_executable = Column(Boolean, default=False, comment="SQL是否可执行")
+    sql_correct = Column(Boolean, default=False, comment="SQL是否正确")
+    e2e_ok = Column(Boolean, default=False, comment="端到端是否正确")
+    latency_ms = Column(Integer, default=0, comment="耗时毫秒")
+    llm_used = Column(Boolean, default=False, comment="是否调用LLM")
+    tokens_json = Column(JSON, default=dict, comment="Token消耗")
+    error_msg = Column(String(512), default="", comment="错误信息")
+    detail_json = Column(JSON, default=dict, comment="判定明细（期望/实际）")
+
+
+class ColumnSample(Base, AuditMixin):
+    """字段样例值（C7）：Schema 采集的低基数字段样例。"""
+    __tablename__ = "column_sample"
+    __table_args__ = {"comment": "字段样例值表"}
+    column_meta_id = Column(BigInteger, nullable=False, comment="字段元信息ID")
+    sample_value = Column(String(128), nullable=False, comment="样例值")
+    freq = Column(Integer, default=0, comment="出现频次")
+    sample_type = Column(String(8), default="top", comment="采集类型 top/random")
+    synced_at = Column(DateTime, default=datetime.utcnow, comment="采集时间")
+
+
+class LineageEdge(Base, AuditMixin):
+    """血缘边（C8）：表/字段级来源-去向关系。"""
+    __tablename__ = "lineage_edge"
+    __table_args__ = {"comment": "血缘边表"}
+    workspace_id = Column(BigInteger, nullable=False, comment="工作空间ID")
+    datasource_id = Column(BigInteger, nullable=False, comment="数据源ID")
+    src_table_id = Column(BigInteger, nullable=False, comment="源表ID")
+    src_column_id = Column(BigInteger, nullable=True, comment="源字段ID（可空=表级）")
+    dst_table_id = Column(BigInteger, nullable=False, comment="目标表ID")
+    dst_column_id = Column(BigInteger, nullable=True, comment="目标字段ID（可空=表级）")
+    edge_type = Column(String(8), default="query", comment="边类型 view/query/manual")
+    source = Column(String(8), default="manual", comment="来源 ddl/query_log/manual")
+    confidence = Column(Integer, default=100, comment="置信度 0-100")
+    last_seen_at = Column(DateTime, nullable=True, comment="最后发现时间")
+
+
+class SceneDef(Base, AuditMixin):
+    """场景模板（C14）：指标包 + 提示词模板 + 示例 + 报告模板。workspace_id 为空=系统预置。"""
+    __tablename__ = "scene_def"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "scene_code"),
+        {"comment": "场景模板表"},
+    )
+    workspace_id = Column(BigInteger, nullable=True, comment="工作空间ID（空=系统预置）")
+    scene_code = Column(String(32), nullable=False, comment="场景编码")
+    scene_name = Column(String(64), nullable=False, comment="场景名称")
+    description = Column(String(255), default="", comment="场景描述")
+    metric_pack_json = Column(JSON, default=list, comment="指标包（建议指标/维度/口径）")
+    gen_prompt_template = Column(Text, default="", comment="生成提示词模板")
+    explain_template = Column(Text, default="", comment="解释/报告模板")
+    examples_json = Column(JSON, default=list, comment="场景示例（问题-SQL对）")
+    report_template = Column(Text, default="", comment="报告模板（auto_report用）")
+    enabled = Column(Boolean, default=True, comment="是否启用")
+    sort_order = Column(Integer, default=0, comment="排序值")

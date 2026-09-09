@@ -34,6 +34,54 @@ class Settings(BaseSettings):
     query_max_rows: int = 1000
     sql_correct_retries: int = 2
 
+    # ===== 能力补建配置（C1/C2/C3/C4/C6/C7/C8/C11/C14）=====
+    # C1 缓存
+    cache_enabled: bool = True
+    cache_ttl_result_sec: int = 900          # 结果缓存 TTL
+    cache_ttl_gen_sec: int = 604800          # 生成缓存 TTL（7 天）
+    cache_similarity: float = 0.92           # 相似问句命中阈值
+    cache_max_entries_per_ws: int = 5000     # 单 workspace 缓存条目上限
+
+    # C2 成本门槛
+    cost_guard_enabled: bool = True
+    cost_guard_explain_timeout_ms: int = 2000
+    cost_guard_mysql_rows_soft: int = 1_000_000
+    cost_guard_mysql_rows_hard: int = 10_000_000
+    cost_guard_pg_cost_soft: float = 50_000
+    cost_guard_pg_cost_hard: float = 500_000
+
+    # C6 超时与限流
+    rate_limit_enabled: bool = True
+    rate_limit_qps: float = 2.0
+    rate_limit_burst: int = 5
+    rate_limit_max_concurrent: int = 5
+    rate_limit_queue_timeout_s: float = 10.0
+    query_timeout_ms: int = 30000
+
+    # C7 样例值采集
+    schema_sync_collect_samples: bool = True
+    schema_sync_sample_per_column: int = 5
+    schema_sync_sample_min_rows: int = 1000
+    schema_sync_sample_timeout_s: float = 3.0
+
+    # C8 血缘采集
+    lineage_collect_enabled: bool = True
+    lineage_ddl_interval_min: int = 360
+    lineage_mine_interval_min: int = 720
+    lineage_max_depth: int = 3
+    lineage_parse_timeout_s: float = 60.0
+
+    # C4 评测
+    eval_mock_execute: bool = True
+    eval_llm_judge_correct: bool = False
+
+    # C14 场景路由
+    scene_auto_route: bool = True
+    scene_llm_fallback: bool = True
+
+    # C11 多候选
+    multi_candidate_enabled: bool = True
+
     @property
     def sqlalchemy_url(self) -> str:
         if self.database_url:

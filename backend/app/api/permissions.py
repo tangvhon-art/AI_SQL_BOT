@@ -4,6 +4,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+import logging
+
+logger = logging.getLogger(__name__)
 from ..engine.permission import compute_permissions
 from ..models import ColumnMeta, Datasource, PermissionRule, Role, TableMeta, User
 from .common import get_or_404, paginate, workspace_scope
@@ -13,19 +16,36 @@ router = APIRouter(prefix="/permission-rules", tags=["permissions"])
 
 
 class RuleIn(BaseModel):
-    scope_type: str  # role / user
+    scope_type: str  # role / user / group
     scope_id: int
     rule_type: str  # allow / deny
     datasource_id: int
     table_id: int
     column_ids: list[int] = []  # 空数组=整表规则
     enabled: bool = True
+    # 行级权限（C3）
+    row_filter: str | None = None          # 行过滤条件（SQL 文本或模板文本）
+    row_filter_type: str = "sql"           # sql / template
+    row_filter_note: str = ""
+    row_enabled: bool = False
 
 
 def _out(r: PermissionRule) -> dict:
     return {"id": r.id, "scope_type": r.scope_type, "scope_id": r.scope_id,
             "rule_type": r.rule_type, "datasource_id": r.datasource_id,
-            "table_id": r.table_id, "column_ids": r.column_ids or [], "enabled": r.enabled}
+            "table_id": r.table_id, "column_ids": r.column_ids or [], "enabled": r.enabled,
+            "row_filter": r.row_filter, "row_filter_type": r.row_filter_type or "sql",
+            "row_filter_note": r.row_filter_note or "", "row_enabled": bool(r.row_enabled)}
+
+
+def _invalidate_cache(ws_id: int, db: Session) -> None:
+    """权限规则变更后清空该工作空间缓存（结果可见性可能已变化）。"""
+    from ..engine.cache_manager import invalidate_all_for_workspace
+    try:
+        invalidate_all_for_workspace(ws_id, db)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[cache] 权限变更后缓存失效失败: %s", exc)
 
 
 def _col_names(db: Session, table_id: int, col_ids: list[int]) -> list[str]:
@@ -72,12 +92,15 @@ def list_rules(scope_type: str = "", rule_type: str = "", datasource_id: int | N
 
 @router.post("")
 def create_rule(body: RuleIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if body.scope_type not in ("role", "user") or body.rule_type not in ("allow", "deny"):
+    if body.scope_type not in ("role", "user", "group") or body.rule_type not in ("allow", "deny"):
         raise HTTPException(400, "scope_type/rule_type 非法")
+    if body.row_enabled and not (body.row_filter or "").strip():
+        raise HTTPException(400, "启用行级规则时 row_filter 不能为空")
     r = PermissionRule(workspace_id=user.workspace_id, **body.model_dump())
     db.add(r)
     db.commit()
     db.refresh(r)
+    _invalidate_cache(user.workspace_id, db)
     return _out(r)
 
 
@@ -88,6 +111,7 @@ def update_rule(rule_id: int, body: RuleIn, db: Session = Depends(get_db),
     for k, v in body.model_dump().items():
         setattr(r, k, v)
     db.commit()
+    _invalidate_cache(user.workspace_id, db)
     return _out(r)
 
 
@@ -97,6 +121,7 @@ def delete_rule(rule_id: int, db: Session = Depends(get_db), user=Depends(get_cu
     if r:
         r.is_deleted = True
         db.commit()
+    _invalidate_cache(user.workspace_id, db)
     return {"ok": True}
 
 
@@ -144,5 +169,35 @@ def _effective_rules(target: User, user_id: int, db: Session) -> list[dict]:
             "column_ids": r.column_ids or [], "column_name": "、".join(col_names),
             "column_names": col_names,
             "enabled": r.enabled,
+            "row_filter": r.row_filter, "row_filter_type": r.row_filter_type or "sql",
+            "row_filter_note": r.row_filter_note or "", "row_enabled": bool(r.row_enabled),
         })
     return out
+
+
+@router.get("/row-effective")
+def row_effective(user_id: int, datasource_id: int | None = None,
+                  db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """行级权限生效预览：给定用户在各表生效的行级规则（deny 优先 / allow 并集）。"""
+    from ..engine.permission import compute_row_rules
+    from ..models import Datasource
+
+    target = get_or_404(db, User, user_id, "用户不存在")
+    ws_id = target.workspace_id
+    q = db.query(TableMeta)
+    if datasource_id:
+        q = q.filter(TableMeta.datasource_id == datasource_id)
+    out = []
+    for tm in q.order_by(TableMeta.datasource_id, TableMeta.table_name).all():
+        rules = compute_row_rules(user_id, ws_id, tm.datasource_id, tm.id)
+        if not rules:
+            continue
+        out.append({
+            "datasource_id": tm.datasource_id,
+            "table_id": tm.id,
+            "table_name": tm.table_name,
+            "rules": [{"rule_id": r.rule_id, "rule_type": r.rule_type,
+                       "condition": r.condition, "condition_type": r.condition_type,
+                       "note": r.note} for r in rules],
+        })
+    return {"user_id": user_id, "items": out}

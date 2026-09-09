@@ -210,8 +210,8 @@ def _mask_columns_in_projections(ast: exp.Expression,
             select.set("expressions", new_exprs)
 
 
-def rewrite_sql_for_user(ast: exp.Expression, dialect: str, user_id: int) -> tuple[str, str, list[str]]:
-    """注入 1=1 / 1=2 并返回 (final_sql, injected_cond, denied_cols)。"""
+def rewrite_sql_for_user(ast: exp.Expression, dialect: str, user_id: int) -> tuple[str, str, list[str], str]:
+    """注入 1=1 / 1=2 与行级过滤（C3），返回 (final_sql, injected_cond, denied_cols, row_rule_summary)。"""
     from ..models import Datasource, TableMeta
     from ..database import SessionLocal
 
@@ -229,7 +229,7 @@ def rewrite_sql_for_user(ast: exp.Expression, dialect: str, user_id: int) -> tup
                 ds_id = tm.datasource_id
                 break
         if ds_id is None:
-            return ast.sql(dialect=dialect), "1=1", []
+            return ast.sql(dialect=dialect), "1=1", [], ""
         workspace_id = db.query(Datasource).get(ds_id).workspace_id
         allow, deny = compute_permissions(user_id, workspace_id)
 
@@ -311,7 +311,235 @@ def rewrite_sql_for_user(ast: exp.Expression, dialect: str, user_id: int) -> tup
         # 整体注入标记：有整表限制则为 1=2（仅用于 trace 展示，实际按 SELECT 粒度注入）
         injected = "1=2" if has_table_deny else "1=1"
 
+        # ===== 行级权限注入（C3）=====
+        row_summary = ""
+        if ds_id is not None:
+            row_summary = _apply_row_rules(
+                ast, dialect, user_id, ds_id, workspace_id,
+                table_denied_set=table_denied_set,
+                denied_cols_by_table=_collect_denied_cols(db, ds_id, tables, deny),
+                cond_deny=cond_deny, cond_allow=cond_allow)
+
         final = ast.sql(dialect=dialect, pretty=True)
-        return final, injected, denied
+        return final, injected, denied, row_summary
     finally:
         db.close()
+
+
+# ========== 行级权限（C3）==========
+
+class RowRule:
+    """行级规则（解析后的内存对象）。"""
+    __slots__ = ("rule_id", "rule_type", "condition", "condition_type", "note")
+
+    def __init__(self, rule_id: int, rule_type: str, condition: str,
+                 condition_type: str, note: str = ""):
+        self.rule_id = rule_id
+        self.rule_type = rule_type          # allow / deny
+        self.condition = condition          # 条件文本（SQL 或模板）
+        self.condition_type = condition_type  # sql / template
+        self.note = note
+
+
+def _user_scope_ids(user_id: int, workspace_id: int) -> tuple[set[int], set[int]]:
+    """返回用户生效 (role_ids, group_ids)。"""
+    from ..models import RoleUser, RoleUserGroup, UserGroupMember
+
+    db = SessionLocal()
+    try:
+        user = db.query(sqlalchemy_user_model()).get(user_id)
+        role_ids: set[int] = set()
+        group_ids: set[int] = set()
+        if user:
+            if user.role_id:
+                role_ids.add(user.role_id)
+            for ru in db.query(RoleUser).filter(RoleUser.user_id == user_id).all():
+                role_ids.add(ru.role_id)
+            group_ids = {m.group_id for m in db.query(UserGroupMember)
+                         .filter(UserGroupMember.user_id == user_id).all()}
+            if group_ids:
+                for rg in (db.query(RoleUserGroup)
+                           .filter(RoleUserGroup.group_id.in_(group_ids)).all()):
+                    role_ids.add(rg.role_id)
+        return role_ids, group_ids
+    finally:
+        db.close()
+
+
+def compute_row_rules(user_id: int, workspace_id: int, datasource_id: int,
+                      table_id: int) -> list[RowRule]:
+    """返回该表对用户生效的行级规则（作用域 user/role/group 并集，deny 优先排序）。"""
+    from ..models import PermissionRule
+
+    role_ids, group_ids = _user_scope_ids(user_id, workspace_id)
+    db = SessionLocal()
+    try:
+        rules = (db.query(PermissionRule)
+                 .filter(PermissionRule.workspace_id == workspace_id,
+                         PermissionRule.datasource_id == datasource_id,
+                         PermissionRule.table_id == table_id,
+                         PermissionRule.enabled.is_(True),
+                         PermissionRule.row_enabled.is_(True))
+                 .all())
+        out: list[RowRule] = []
+        for r in rules:
+            if not (r.row_filter or "").strip():
+                continue
+            hit = (r.scope_type == "user" and r.scope_id == user_id) \
+                or (r.scope_type == "role" and r.scope_id in role_ids) \
+                or (r.scope_type == "group" and r.scope_id in group_ids)
+            if hit:
+                out.append(RowRule(r.id, r.rule_type, r.row_filter, r.row_filter_type or "sql",
+                                   r.row_filter_note or ""))
+        # deny 优先（黑名单优先）
+        out.sort(key=lambda x: (0 if x.rule_type == "deny" else 1, x.rule_id))
+        return out
+    finally:
+        db.close()
+
+
+def _resolve_row_template(condition: str, user_id: int, group_ids: set[int],
+                          role_code: str) -> str:
+    """模板占位替换：{user_id}/{group_ids}/{role_code}（角色编码走单引号转义）。"""
+    text = condition
+    text = text.replace("{user_id}", str(user_id))
+    gids = ", ".join(str(g) for g in sorted(group_ids)) if group_ids else "0"
+    text = text.replace("{group_ids}", gids)
+    if "{role_code}" in text:
+        safe = role_code.replace("'", "''")
+        text = text.replace("{role_code}", f"'{safe}'")
+    return text
+
+
+def _build_row_condition(rules: list[RowRule], user_id: int, group_ids: set[int],
+                         role_code: str, dialect: str) -> tuple[exp.Expression | None, list[str]]:
+    """合并行级条件：visible = (OR allow) AND NOT (OR deny)。
+    返回 (表达式, 摘要列表)；无法解析的规则跳过。"""
+    allow_exprs: list[exp.Expression] = []
+    deny_exprs: list[exp.Expression] = []
+    summaries: list[str] = []
+    for r in rules:
+        cond_text = r.condition
+        if r.condition_type == "template":
+            cond_text = _resolve_row_template(cond_text, user_id, group_ids, role_code)
+        try:
+            cond = sqlglot.parse_one(cond_text, read=dialect)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[row] 行级条件解析失败 rule#%s: %s", r.rule_id, exc)
+            continue
+        if not isinstance(cond, exp.Expression):
+            continue
+        summaries.append(f"row_rule#{r.rule_id}:{cond_text[:60]}")
+        if r.rule_type == "deny":
+            deny_exprs.append(cond)
+        else:
+            allow_exprs.append(cond)
+    if not allow_exprs and not deny_exprs:
+        return None, []
+    parts: list[exp.Expression] = []
+    if allow_exprs:
+        parts.append(exp.or_(*allow_exprs) if len(allow_exprs) > 1 else allow_exprs[0])
+    if deny_exprs:
+        d = exp.or_(*deny_exprs) if len(deny_exprs) > 1 else deny_exprs[0]
+        parts.append(exp.Not(this=d))
+    return (exp.and_(*parts) if len(parts) > 1 else parts[0]), summaries
+
+
+def _and_to_where(select: exp.Select, cond: exp.Expression) -> None:
+    existing = select.args.get("where")
+    if existing is not None:
+        select.args["where"] = exp.Where(this=exp.and_(existing.this, cond))
+    else:
+        select.args["where"] = exp.Where(this=cond)
+
+
+def _inject_table_condition(select: exp.Select, table_name: str, cond: exp.Expression) -> None:
+    """行级条件注入：FROM 首表 → WHERE；JOIN 表 → ON（保留 LEFT JOIN 语义）；无 ON 的 JOIN → WHERE。"""
+    from_node = select.args.get("from_")
+    if from_node and isinstance(from_node.this, exp.Table) \
+            and str(from_node.this.name).lower() == table_name.lower():
+        _and_to_where(select, cond)
+        return
+    for j in (select.args.get("joins") or []):
+        if isinstance(j.this, exp.Table) and str(j.this.name).lower() == table_name.lower():
+            on = j.args.get("on")
+            if on is None:
+                _and_to_where(select, cond)
+            else:
+                j.args["on"] = exp.and_(on, cond)
+            return
+
+
+def _collect_denied_cols(db, ds_id: int, tables: list[tuple[str, str]],
+                         deny: set[str]) -> dict[str, set[str]]:
+    """列级 deny 命中列：小写表名 -> 小写列名集合（供行级条件冲突保守策略使用）。"""
+    from ..models import TableMeta, ColumnMeta
+
+    out: dict[str, set[str]] = {}
+    for schema, table in tables:
+        tm = (db.query(TableMeta)
+              .filter(TableMeta.schema_name == schema, TableMeta.table_name == table).first()
+              if schema else db.query(TableMeta).filter(TableMeta.table_name == table).first())
+        if not tm:
+            continue
+        cols = {c.column_name for c in
+                db.query(ColumnMeta).filter(ColumnMeta.table_meta_id == tm.id).all()}
+        denied = {c for c in cols if f"{ds_id}.{tm.schema_name}.{tm.table_name}.{c}" in deny}
+        if denied:
+            out[table.lower()] = {c.lower() for c in denied}
+    return out
+
+
+def _apply_row_rules(ast: exp.Expression, dialect: str, user_id: int, ds_id: int,
+                     workspace_id: int, table_denied_set: set[str],
+                     denied_cols_by_table: dict[str, set[str]],
+                     cond_deny: exp.Expression, cond_allow: exp.Expression) -> str:
+    """为查询涉及的每张表注入行级条件；返回摘要（";" 连接，≤256 字符）。"""
+    from ..models import Role, TableMeta
+
+    db = SessionLocal()
+    try:
+        role_code = ""
+        user = db.query(sqlalchemy_user_model()).get(user_id)
+        if user:
+            role = db.query(Role).get(user.role_id)
+            role_code = role.code if role else ""
+        group_ids = _user_scope_ids(user_id, workspace_id)[1]
+        table_id_map: dict[str, int] = {}
+        for tm in db.query(TableMeta).filter(TableMeta.datasource_id == ds_id).all():
+            table_id_map[tm.table_name.lower()] = tm.id
+    finally:
+        db.close()
+
+    cte_names = {str(c.alias).lower() for c in ast.find_all(exp.CTE) if c.alias}
+    summaries: list[str] = []
+    for select in ast.find_all(exp.Select):
+        tables: list[str] = []
+        from_node = select.args.get("from_")
+        if from_node and isinstance(from_node.this, exp.Table):
+            tables.append(str(from_node.this.name))
+        for j in (select.args.get("joins") or []):
+            if isinstance(j.this, exp.Table):
+                tables.append(str(j.this.name))
+        for tname in tables:
+            tkey = tname.lower()
+            if tkey in cte_names or tkey in table_denied_set:
+                continue
+            table_id = table_id_map.get(tkey)
+            if not table_id:
+                continue
+            rules = compute_row_rules(user_id, workspace_id, ds_id, table_id)
+            if not rules:
+                continue
+            cond, sums = _build_row_condition(rules, user_id, group_ids, role_code, dialect)
+            if cond is None:
+                continue
+            # 保守策略：行条件引用的列若被列级 deny → 整表拒绝（1=2）
+            ref_cols = {str(c.name).lower() for c in cond.find_all(exp.Column)}
+            if ref_cols & denied_cols_by_table.get(tkey, set()):
+                _inject_table_condition(select, tname, cond_deny.copy())
+                summaries.append(f"row_rule(列级冲突→整表拒绝):{tname}")
+                continue
+            _inject_table_condition(select, tname, cond)
+            summaries.extend(sums)
+    return ";".join(summaries)[:256]

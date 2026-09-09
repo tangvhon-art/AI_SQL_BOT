@@ -32,6 +32,7 @@ from ..engine.query_spec import (INTENT_LABELS, load_intent_dicts,
                                  spec_from_dict, spec_to_dict)
 from ..engine.soft_delete import inject_soft_delete
 from ..executor import run_query, to_jsonable
+from ..engine.rate_limiter import RateLimitExceeded
 from ..llm import LLMClient, LLMError
 from ..models import (Conversation, ConversationMessage, FaqPair, QueryLog,
                       SavedQuery)
@@ -461,8 +462,30 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
             llm_select_source = None
             used_template = False
             sql = None
+            analysis = None
             analysis_meta = {}
             inner = "query"
+            # ===== C14 场景识别（确定性关键词路由）=====
+            scene_code = ""
+            try:
+                from ..config import get_settings as _gs
+                if _gs().scene_auto_route:
+                    from ..engine.scene_router import detect_scene
+                    scene_code = detect_scene(question, db)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[scene] 场景识别失败: %s", exc)
+            log.scene_code = scene_code or ""
+            # ===== C1 一级生成缓存（相似问句复用 SQL，阈值 cache_similarity）=====
+            gen_cache_sql = None
+            gen_cache_key = ""
+            from ..engine.cache_manager import lookup_gen_cache, store_gen_cache
+            try:
+                _gen = lookup_gen_cache(question, ws_id, datasource_id, db)
+                if _gen and _gen.get("sql"):
+                    gen_cache_sql = _gen["sql"]
+                    gen_cache_key = _gen.get("_cache_key") or ""
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[cache] 生成缓存读取失败: %s", exc)
             if mapping is not None and not is_table_confirm:
                 try:
                     analysis = build_analysis_sql(spec, mapping, dialect)
@@ -474,11 +497,20 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
             elif is_table_confirm:
                 logger.info("用户已确认表，跳过模板 SQL，强制走 LLM 路径（综合使用确认表生成 SQL）")
 
-            if not used_template:
+            if not used_template and gen_cache_sql is None:
                 # NL2SQL LLM 路径：全表选表→字段→关系→生成 SQL（映射失败/模板无法覆盖均走此路）
                 spec_context = {"spec": spec_to_dict(spec)}
                 if mapping is not None:
                     spec_context["mapping"] = {k: v for k, v in mapping.items() if k != "table"}
+                # C14 场景上下文注入（指标包 + 示例 + 生成要求）
+                if scene_code:
+                    try:
+                        from ..engine.scene_router import get_scene_context
+                        spec_context["scene"] = {
+                            "code": scene_code,
+                            "context": get_scene_context(scene_code, ws_id, db)}
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("[scene] 场景上下文注入失败: %s", exc)
                 yield _sse("progress", {"stage": "generate", "msg": "正在生成 SQL…"})
                 logger.info("[问数][%s][generate] 进入 LLM 全表选表路径: used_template=%s "
                             "is_table_confirm=%s spec_context=%s",
@@ -542,6 +574,40 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
                 llm_select_source = result.get("select_source") or "llm"
                 analysis_meta = {"intent": spec.intent}
 
+            # ===== C1 一级生成缓存：命中直接复用 SQL / 未命中写入 =====
+            if gen_cache_sql is not None:
+                sql = gen_cache_sql
+                analysis_meta = {}
+                # 兜底初始化（供执行失败重试路径使用）
+                spec_context = {"spec": spec_to_dict(spec)}
+                if mapping is not None:
+                    spec_context["mapping"] = {k: v for k, v in mapping.items() if k != "table"}
+                history = _load_history(db, conv_id)
+                log.cache_hit = True
+                log.cache_key = gen_cache_key
+                logger.info("[问数][%s][cache] 一级生成缓存命中", log.id)
+            else:
+                store_gen_cache(question, sql, ws_id, datasource_id, db)
+
+            # ===== C11 多候选评分择优（≤4 候选，五维评分；致命项一票否决）=====
+            if get_settings().multi_candidate_enabled and sql:
+                try:
+                    from ..engine.candidate import build_and_rank
+                    template_sql = (analysis.get("sql") if analysis else None)
+                    best, cand_log = build_and_rank(
+                        sql, template_sql, spec, mapping, datasource_id,
+                        dialect, question)
+                    if best and best.strip():
+                        if best.strip() != sql.strip():
+                            logger.info("[问数][%s][candidate] 择优替换候选 SQL",
+                                        log.id)
+                        sql = best
+                    log.candidates_json = cand_log
+                    db.commit()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[问数][%s][candidate] 多候选评分失败，沿用原 SQL: %s",
+                                   log.id, exc)
+
             # ===== 自动注入 is_deleted = 0 =====
             sql = inject_soft_delete(sql, datasource_id, body.question, db)
 
@@ -554,7 +620,15 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
             yield _sse("progress", {"stage": "execute", "msg": "正在查询数据…"})
             exec_retried = False
             try:
-                exec_result = run_query(datasource_id, sql, user.id, dialect=dialect)
+                exec_result = _run_query_cached(sql, datasource_id, user.id, dialect, db, log)
+            except RateLimitExceeded as exc:  # noqa: F821
+                logger.warning("[问数][%s][rate_limit] %s", log.id, exc)
+                yield _sse("error", {"code": "RATE_LIMITED", "msg": str(exc)})
+                log.executed = False
+                log.limited = True
+                db.commit()
+                yield _sse("done", {})
+                return
             except Exception as exc:  # noqa: BLE001
                 logger.warning("执行失败: %s", exc)
                 # LLM 路径执行失败 → 回传错误让 LLM 自动修正一次（模板路径失败直接报错）
@@ -578,7 +652,7 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
                         db.commit()
                         yield _sse("sql", {"sql": sql, "dialect": dialect, "permission": "待校验"})
                         try:
-                            exec_result = run_query(datasource_id, sql, user.id, dialect=dialect)
+                            exec_result = _run_query_cached(sql, datasource_id, user.id, dialect, db, log)
                         except Exception as exc2:  # noqa: BLE001
                             logger.warning("修正后仍执行失败: %s", exc2)
                             yield _sse("error", {"code": "SQL_EXEC_FAILED", "msg": str(exc2)})
@@ -747,6 +821,28 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
     return StreamingResponse(event_stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
                                       "X-Accel-Buffering": "no"})
+
+
+def _run_query_cached(sql: str, datasource_id: int, user_id: int, dialect: str,
+                      db: Session, log: QueryLog) -> dict:
+    """执行并读写结果缓存（C1）。命中：返回缓存结果并标记 log；未命中：执行后写入。"""
+    from ..config import get_settings
+    from ..engine.cache_manager import (fingerprint_sql, lookup_result_cache,
+                                        store_result_cache)
+
+    settings = get_settings()
+    if not settings.cache_enabled:
+        return run_query(datasource_id, sql, user_id, dialect=dialect)
+    cache_key = fingerprint_sql(sql, dialect)
+    cached = lookup_result_cache(cache_key, log.workspace_id, datasource_id, db)
+    if cached is not None:
+        log.cache_hit = True
+        log.cache_key = cache_key
+        logger.info("[问数][%s][cache] 结果缓存命中 %s", log.id, cache_key)
+        return cached
+    result = run_query(datasource_id, sql, user_id, dialect=dialect)
+    store_result_cache(cache_key, sql, log.workspace_id, datasource_id, result, db)
+    return result
 
 
 def _strip_thinking_preamble(text: str) -> str:

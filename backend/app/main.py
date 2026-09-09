@@ -4,8 +4,9 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import (audit, auth, chat, datasources, dicts, doc_chat_api,
-                  knowledge, models_config, org, permissions, scheduled_tasks)
+from .api import (audit, auth, cache, chat, datasources, dicts, doc_chat_api,
+                  eval as eval_api, knowledge, lineage, models_config, org,
+                  permissions, scenes, scheduled_tasks)
 from .config import get_settings
 from .database import init_db
 from .engine.scheduler import start_scheduler, stop_scheduler
@@ -40,6 +41,11 @@ app.include_router(permissions.router, prefix=API_PREFIX)
 app.include_router(dicts.router, prefix=API_PREFIX)
 app.include_router(audit.router, prefix=API_PREFIX)
 app.include_router(org.router, prefix=API_PREFIX)
+# 能力补建路由（C1/C4/C8/C14）
+app.include_router(cache.router, prefix=API_PREFIX)
+app.include_router(eval_api.router, prefix=API_PREFIX)
+app.include_router(lineage.router, prefix=API_PREFIX)
+app.include_router(scenes.router, prefix=API_PREFIX)
 
 
 @app.on_event("startup")
@@ -50,6 +56,9 @@ def on_startup():
     try:
         auth.seed_default_user(db)
         org.seed_default_menus(db)
+        # C14 预置六大场景模板（幂等）
+        from .engine.scene_router import seed_scenes
+        seed_scenes(db)
     finally:
         db.close()
     start_scheduler()
