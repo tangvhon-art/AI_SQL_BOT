@@ -66,8 +66,8 @@ def compute_permissions(user_id: int, workspace_id: int) -> tuple[set[str], set[
             cols = (db.query(ColumnMeta)
                     .filter(ColumnMeta.table_meta_id == r.table_id).all())
             col_names = [c.column_name for c in cols]
-            # column_ids 空数组 = 整表规则；非空 = 指定字段列表
-            rule_col_ids = r.column_ids or []
+            # column_ids 空数组或 [0]（整表标记）= 整表规则；非空 = 指定字段列表
+            rule_col_ids = [c for c in (r.column_ids or []) if c != 0]
             if not rule_col_ids:
                 targets = col_names
             else:

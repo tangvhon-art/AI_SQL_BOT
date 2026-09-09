@@ -139,7 +139,7 @@ export interface ScheduledTask {
 
 export interface PermissionRule {
   id?: number
-  scope_type: 'role' | 'user'
+  scope_type: 'role' | 'user' | 'group'
   scope_id: number
   rule_type: 'allow' | 'deny'
   datasource_id: number
@@ -150,6 +150,11 @@ export interface PermissionRule {
   column_name?: string  // 兼容字段，逗号分隔的多字段名
   column_names?: string[]  // 多字段名数组
   datasource_name?: string
+  // C3 行级权限扩展
+  row_filter?: string | null
+  row_filter_type?: 'sql' | 'template'
+  row_filter_note?: string
+  row_enabled?: boolean
 }
 
 export interface QueryLog {
@@ -177,4 +182,112 @@ export interface MenuItem {
   path: string
   icon: string
   sort_order: number
+}
+
+// ==================== 能力补建（C1/C3/C4/C7/C8/C14）类型 ====================
+
+/** C14 场景模板 */
+export interface SceneDef {
+  id: number
+  workspace_id: number | null
+  scene_code: string
+  scene_name: string
+  description: string
+  metric_pack: Array<{ name?: string; metric?: string; desc?: string }>
+  gen_prompt_template: string
+  explain_template: string
+  examples: Array<{ question?: string; sql?: string; note?: string }>
+  report_template: string
+  enabled: boolean
+  sort_order: number
+  system: boolean
+}
+
+/** C1 缓存统计 */
+export interface CacheStats {
+  total: number
+  by_type: Record<string, number>
+  total_hits: number
+  recent: Array<{
+    id: number
+    cache_type: string
+    cache_key: string
+    question: string
+    sql_text: string
+    datasource_id: number
+    hit_count: number
+    last_hit_at: string | null
+    expires_at: string | null
+  }>
+}
+
+/** C4 评测用例 */
+export interface EvalCase {
+  id: number
+  datasource_id: number
+  datasource_name?: string
+  question: string
+  expect_tables: string[]
+  expect_metrics: string[]
+  expect_filters: string[]
+  expect_sql: string
+  scene_code: string
+  tags: string
+  status: string
+}
+
+/** C4 评测批次 */
+export interface EvalRun {
+  id: number
+  name: string
+  status: string
+  total: number
+  metrics: Record<string, number | null>
+  started_at: string | null
+  finished_at: string | null
+  mock_execute: boolean
+}
+
+/** C4 评测报告明细 */
+export interface EvalResultItem {
+  case_id: number
+  question: string
+  intent_ok: boolean | null
+  tables_hit: boolean | null
+  sql_generated: boolean
+  sql_executable: boolean | null
+  sql_correct: boolean | null
+  e2e_ok: boolean | null
+  latency_ms: number | null
+  llm_used: string
+  error_msg: string
+  detail: Record<string, unknown>
+}
+
+/** C8 血缘图（ECharts graph 结构） */
+export interface LineageGraph {
+  nodes: Array<{
+    id: string
+    name: string
+    table_id?: number
+    category?: number
+    source?: string
+    value?: string
+  }>
+  edges: Array<{
+    source: string
+    target: string
+    label?: string
+    src_col?: string
+    dst_col?: string
+    source_type?: string
+    confidence?: number
+  }>
+  root?: string
+}
+
+/** 系统配置分组（键为 config 字段名） */
+export interface SystemConfigResp {
+  sections: Record<string, Record<string, unknown>>
+  overridden: string[]
 }

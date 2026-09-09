@@ -16,6 +16,11 @@ import AuditPage from './pages/AuditPage'
 import RolePage from './pages/RolePage'
 import GroupPage from './pages/GroupPage'
 import UserPage from './pages/UserPage'
+import EvalPage from './pages/EvalPage'
+import LineagePage from './pages/LineagePage'
+import ScenesPage from './pages/ScenesPage'
+import CachePage from './pages/CachePage'
+import SysConfigPage from './pages/SysConfigPage'
 import { TOKEN_KEY } from './api/client'
 import { glassTheme } from './ui'
 
@@ -37,6 +42,11 @@ function Shell() {
           <Route path="/groups" element={<GroupPage />} />
           <Route path="/users" element={<UserPage />} />
           <Route path="/permissions" element={<PermissionPage />} />
+          <Route path="/eval" element={<EvalPage />} />
+          <Route path="/lineage" element={<LineagePage />} />
+          <Route path="/scenes" element={<ScenesPage />} />
+          <Route path="/cache" element={<CachePage />} />
+          <Route path="/sys-config" element={<SysConfigPage />} />
           <Route path="/audit" element={<AuditPage />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />
         </Route>

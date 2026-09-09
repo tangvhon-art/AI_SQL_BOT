@@ -157,10 +157,11 @@ def _save_user_message(db: Session, conv_id: int, question: str) -> None:
 
 
 def _create_query_log(db: Session, ws_id: int, user, conv_id: int,
-                      question: str, intent: str = "nl2sql") -> QueryLog:
+                      question: str, intent: str = "nl2sql",
+                      datasource_id: int | None = None) -> QueryLog:
     """创建问数审计日志（QueryLog）并返回。"""
     log = QueryLog(workspace_id=ws_id, user_id=user.id, conversation_id=conv_id,
-                   question=question, intent=intent)
+                   question=question, intent=intent, datasource_id=datasource_id)
     db.add(log)
     db.commit()
     db.refresh(log)
@@ -249,7 +250,8 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
         prev_spec = _load_prev_spec(db, conv_id) if body.conversation_id else None
 
         _save_user_message(db, conv_id, body.question)
-        log = _create_query_log(db, ws_id, user, conv_id, body.question, "nl2sql")
+        log = _create_query_log(db, ws_id, user, conv_id, body.question, "nl2sql",
+                                datasource_id=body.datasource_id)
 
         start = time.time()
         try:
@@ -468,7 +470,7 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
             # ===== C14 场景识别（确定性关键词路由）=====
             scene_code = ""
             try:
-                from ..config import get_settings as _gs
+                from ..config_override import get_effective as _gs
                 if _gs().scene_auto_route:
                     from ..engine.scene_router import detect_scene
                     scene_code = detect_scene(question, db)
@@ -590,6 +592,7 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
                 store_gen_cache(question, sql, ws_id, datasource_id, db)
 
             # ===== C11 多候选评分择优（≤4 候选，五维评分；致命项一票否决）=====
+            from ..config_override import get_effective as get_settings
             if get_settings().multi_candidate_enabled and sql:
                 try:
                     from ..engine.candidate import build_and_rank
@@ -826,7 +829,7 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
 def _run_query_cached(sql: str, datasource_id: int, user_id: int, dialect: str,
                       db: Session, log: QueryLog) -> dict:
     """执行并读写结果缓存（C1）。命中：返回缓存结果并标记 log；未命中：执行后写入。"""
-    from ..config import get_settings
+    from ..config_override import get_effective as get_settings
     from ..engine.cache_manager import (fingerprint_sql, lookup_result_cache,
                                         store_result_cache)
 

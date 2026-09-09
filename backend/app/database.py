@@ -304,6 +304,19 @@ def _migrate_meta_tables() -> None:
                     conn.exec_driver_sql(
                         f"ALTER TABLE `{name}` ADD COLUMN `samples_json` "
                         "JSON NULL COMMENT '样例值冗余（column_sample 表为主）'")
+
+            # 11) query_log 数据源 ID（C8 血缘挖掘）
+            if name == "query_log":
+                if "datasource_id" not in cols:
+                    conn.exec_driver_sql(
+                        f"ALTER TABLE `{name}` ADD COLUMN `datasource_id` "
+                        "BIGINT NULL COMMENT '数据源ID（血缘挖掘用）'")
+
+            # 12) eval_result sql_correct 允许 NULL（三态：未判定/通过/未通过）
+            if name == "eval_result":
+                conn.exec_driver_sql(
+                    "ALTER TABLE `eval_result` MODIFY COLUMN `sql_correct` "
+                    "BOOLEAN NULL COMMENT 'SQL是否正确（NULL=未判定，需填写期望SQL）'")
         # 恢复外键检查
         conn.exec_driver_sql("SET FOREIGN_KEY_CHECKS = 1")
 

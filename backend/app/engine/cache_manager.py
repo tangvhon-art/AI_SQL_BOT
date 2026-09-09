@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 import sqlglot
 
-from ..config import get_settings
+from ..config_override import get_effective as get_settings
 from ..executor import to_jsonable
 
 logger = logging.getLogger(__name__)

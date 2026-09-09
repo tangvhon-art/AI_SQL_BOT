@@ -7,7 +7,7 @@ import sqlglot
 import sqlglot.expressions as exp
 from sqlalchemy import create_engine, text
 
-from .config import get_settings
+from .config_override import get_effective as get_settings
 from .engine.permission import rewrite_sql_for_user
 
 logger = logging.getLogger(__name__)

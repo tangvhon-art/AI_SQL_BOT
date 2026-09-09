@@ -3,9 +3,10 @@
 import { useEffect, useState } from 'react'
 import { Avatar, Breadcrumb, Dropdown, Layout, Menu, Space, Tag, Typography } from 'antd'
 import {
-  ApiOutlined, AuditOutlined, CommentOutlined, DatabaseOutlined, DownOutlined, FileTextOutlined,
-  LogoutOutlined, RobotOutlined, SafetyCertificateOutlined, ScheduleOutlined, SettingOutlined,
-  TeamOutlined, UsergroupAddOutlined, UserOutlined,
+  ApiOutlined, AppstoreOutlined, AuditOutlined, CommentOutlined, ControlOutlined, DatabaseOutlined,
+  DownOutlined, ExperimentOutlined, FileTextOutlined, ForkOutlined, LogoutOutlined,
+  RobotOutlined, SafetyCertificateOutlined, ScheduleOutlined, SettingOutlined,
+  TeamOutlined, ThunderboltOutlined, UsergroupAddOutlined, UserOutlined,
 } from '@ant-design/icons'
 import type { MenuProps } from 'antd'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
@@ -34,6 +35,16 @@ const MENU: MenuProps['items'] = [
       { key: '/audit', icon: <AuditOutlined />, label: '审计日志' },
     ],
   },
+  {
+    key: 'cap', icon: <ExperimentOutlined />, label: '能力增强',
+    children: [
+      { key: '/eval', icon: <ExperimentOutlined />, label: '评测中心' },
+      { key: '/lineage', icon: <ForkOutlined />, label: '血缘图谱' },
+      { key: '/scenes', icon: <AppstoreOutlined />, label: '场景模板' },
+      { key: '/cache', icon: <ThunderboltOutlined />, label: '缓存管理' },
+      { key: '/sys-config', icon: <ControlOutlined />, label: '系统配置' },
+    ],
+  },
   { key: '/saved', icon: <ScheduleOutlined />, label: '定时任务' },
 ]
 
@@ -45,9 +56,14 @@ const CRUMB_MAP: Record<string, { title: string; extra?: string }> = {
   '/roles': { title: '角色管理', extra: '角色 CRUD，可分配用户、用户组与菜单（权限取并集）' },
   '/groups': { title: '用户组管理', extra: '用户组 CRUD 与成员管理，组内角色随组生效' },
   '/users': { title: '用户管理', extra: '用户 CRUD，可分配角色与用户组（取并集）' },
-  '/permissions': { title: '权限控制', extra: '角色/用户/用户组可查并集与不可查并集（黑名单优先）' },
+  '/permissions': { title: '权限控制', extra: '角色/用户/用户组可查并集与不可查并集（黑名单优先），支持行级权限规则配置' },
   '/models': { title: '模型配置', extra: 'OpenAI 兼容 LLM 与 Embedding' },
   '/audit': { title: '审计日志', extra: '问数全链路留痕（含权限注入类型）' },
+  '/eval': { title: '评测中心', extra: '评测用例管理、批次执行与指标报告（C4 评测闭环）' },
+  '/lineage': { title: '血缘图谱', extra: '表/字段血缘查询与手动挖掘（C8 血缘）' },
+  '/scenes': { title: '场景模板', extra: '六大场景模板包管理与场景识别测试（C14）' },
+  '/cache': { title: '缓存管理', extra: 'SQL 生成缓存 / 结果缓存统计与清理（C1）' },
+  '/sys-config': { title: '系统配置', extra: '成本门槛 / 限流超时 / 样例值采集等能力参数（DB 覆盖即时生效）' },
   '/saved': { title: '定时任务', extra: '保存查询参数化、cron 定时生成数据与图表' },
 }
 
@@ -100,15 +116,17 @@ export default function App() {
             </div>
           )}
         </div>
+        <div style={{ height: 'calc(100vh - 104px)', overflowY: 'auto', overflowX: 'hidden' }}>
         <Menu
           theme="dark"
           mode="inline"
           selectedKeys={[selected]}
           items={MENU}
-          defaultOpenKeys={['data', 'sys']}
+          defaultOpenKeys={[]}
           onClick={(e) => nav(e.key)}
           style={{ borderInlineEnd: 'none', marginTop: 8, background: 'transparent' }}
         />
+        </div>
       </Sider>
       <Layout style={{ background: 'transparent' }}>
         <Header className="glass-header" style={{

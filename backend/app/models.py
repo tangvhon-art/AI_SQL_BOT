@@ -275,6 +275,7 @@ class QueryLog(Base, AuditMixin):
     __table_args__ = {"comment": "问数日志表"}
     workspace_id = Column(BigInteger, nullable=False, comment="工作空间ID")
     user_id = Column(BigInteger, nullable=False, comment="用户ID")
+    datasource_id = Column(BigInteger, nullable=True, comment="数据源ID（血缘挖掘用）")
     conversation_id = Column(BigInteger, nullable=True, comment="会话ID")
     question = Column(String(512), default="", comment="问题")
     intent = Column(String(32), default="", comment="意图类型")
@@ -365,6 +366,18 @@ class PermissionRule(Base, AuditMixin):
     row_filter_type = Column(String(8), default="sql", comment="行过滤类型 sql/template")
     row_filter_note = Column(String(256), default="", comment="行过滤说明（审计展示）")
     row_enabled = Column(Boolean, default=False, comment="行级规则是否启用")
+
+
+# ---------- 系统配置覆盖（能力补建：平台级配置持久化） ----------
+class SystemConfig(Base, AuditMixin):
+    __tablename__ = "system_config"
+    __table_args__ = (
+        UniqueConstraint("key", name="uk_syscfg_key"),
+        {"comment": "系统配置覆盖表（平台级，key 为 config 字段名）"},
+    )
+    section = Column(String(32), nullable=False, comment="配置分组（cache/cost_guard/rate_limit/schema_sync/lineage/eval）")
+    key = Column(String(64), nullable=False, comment="config 字段名")
+    value_json = Column(JSON, nullable=False, comment="覆盖值")
 
 
 # ---------- 意图识别词典与句式模板（AI 问数重构：L2 意图理解层配置化） ----------
@@ -458,7 +471,7 @@ class EvalResult(Base, AuditMixin):
     tables_hit = Column(Boolean, default=False, comment="期望表是否命中")
     sql_generated = Column(Boolean, default=False, comment="是否生成SQL")
     sql_executable = Column(Boolean, default=False, comment="SQL是否可执行")
-    sql_correct = Column(Boolean, default=False, comment="SQL是否正确")
+    sql_correct = Column(Boolean, nullable=True, comment="SQL是否正确（NULL=未判定，需填写期望SQL）")
     e2e_ok = Column(Boolean, default=False, comment="端到端是否正确")
     latency_ms = Column(Integer, default=0, comment="耗时毫秒")
     llm_used = Column(Boolean, default=False, comment="是否调用LLM")

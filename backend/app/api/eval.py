@@ -89,6 +89,27 @@ def delete_case(case_id: int, db: Session = Depends(get_db),
     return {"ok": True}
 
 
+@router.put("/cases/{case_id}")
+def update_case(case_id: int, body: EvalCaseIn, db: Session = Depends(get_db),
+                user=Depends(get_current_user)):
+    c = db.query(EvalCase).get(case_id)
+    if not c or c.is_deleted:
+        raise HTTPException(404, "用例不存在")
+    if not body.question.strip():
+        raise HTTPException(400, "question 不能为空")
+    c.datasource_id = body.datasource_id
+    c.question = body.question.strip()
+    c.expect_tables_json = body.expect_tables
+    c.expect_metrics_json = body.expect_metrics
+    c.expect_filters_json = body.expect_filters
+    c.expect_sql = body.expect_sql
+    c.scene_code = body.scene_code
+    c.tags = body.tags
+    db.commit()
+    db.refresh(c)
+    return _case_out(c)
+
+
 # ---------- 批次 ----------
 
 @router.get("/runs")
@@ -106,7 +127,7 @@ def list_runs(page: int = 1, size: int = 10,
 @router.post("/runs")
 def create_run(body: EvalRunIn, db: Session = Depends(get_db),
                user=Depends(get_current_user)):
-    from ..config import get_settings
+    from ..config_override import get_effective as get_settings
     from ..engine.llm_provider import resolve_llm_client
 
     mock = body.mock_execute if body.mock_execute is not None \

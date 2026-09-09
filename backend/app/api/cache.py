@@ -34,10 +34,14 @@ def cache_stats(db: Session = Depends(get_db), user=Depends(get_current_user)):
 
 
 @router.delete("")
-def clear_cache(datasource_id: int | None = None,
+def clear_cache(datasource_id: int | None = None, cache_type: str | None = None,
                 db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """清空缓存：传 datasource_id 只清该数据源，否则清空整个工作空间。"""
-    if datasource_id:
+    """清空缓存：cache_type（gen/result）按类型 / datasource_id 按数据源 / 都不传清空整个工作空间。"""
+    if cache_type:
+        n = db.query(CacheEntry).filter(
+            CacheEntry.workspace_id == user.workspace_id,
+            CacheEntry.cache_type == cache_type).delete(synchronize_session=False)
+    elif datasource_id:
         n = invalidate_for_datasource(datasource_id, db)
     else:
         n = invalidate_all_for_workspace(user.workspace_id, db)

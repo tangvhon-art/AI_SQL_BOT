@@ -49,12 +49,13 @@ def _invalidate_cache(ws_id: int, db: Session) -> None:
 
 
 def _col_names(db: Session, table_id: int, col_ids: list[int]) -> list[str]:
-    """根据字段ID列表查询字段名，空列表返回['（整表）']。"""
-    if not col_ids:
+    """根据字段ID列表查询字段名，空列表或 [0]（整表标记）返回['（整表）']。"""
+    effective = [c for c in (col_ids or []) if c != 0]
+    if not effective:
         return ["（整表）"]
-    cols = db.query(ColumnMeta).filter(ColumnMeta.id.in_(col_ids)).all()
+    cols = db.query(ColumnMeta).filter(ColumnMeta.id.in_(effective)).all()
     id_to_name = {c.id: c.column_name for c in cols}
-    return [id_to_name.get(cid, f"未知字段({cid})") for cid in col_ids]
+    return [id_to_name.get(cid, f"未知字段({cid})") for cid in effective]
 
 
 @router.get("")

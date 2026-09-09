@@ -197,7 +197,7 @@ class SchedulerThread(threading.Thread):
                     db.close()
                 # C8 血缘定时挖掘（每 lineage_ddl_interval_min 分钟，含 QueryLog 与视图 DDL）
                 try:
-                    from ..config import get_settings
+                    from ..config_override import get_effective as get_settings
                     s = get_settings()
                     if s.lineage_collect_enabled and \
                             time.time() - self._last_lineage_mine >= s.lineage_ddl_interval_min * 60:

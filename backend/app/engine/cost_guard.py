@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import create_engine, text
 
-from ..config import get_settings
+from ..config_override import get_effective as get_settings
 from ..security import aes_decrypt
 
 logger = logging.getLogger(__name__)

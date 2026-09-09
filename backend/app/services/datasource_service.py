@@ -51,7 +51,7 @@ def _collect_column_samples(conn, db, ds: Datasource, table_map: dict) -> int:
     """对低基数字段采集 top-N 样例值（C7）。
     仅 MySQL/PostgreSQL；表行数 < sample_min_rows 跳过；单列查询超时 3s 跳过；
     表名/列名仅允许 [A-Za-z0-9_$]（防注入）。返回采集字段数。"""
-    from ..config import get_settings
+    from ..config_override import get_effective as get_settings
     from ..models import ColumnSample
 
     settings = get_settings()

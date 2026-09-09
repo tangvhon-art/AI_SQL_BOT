@@ -8,7 +8,7 @@ import logging
 import threading
 import time
 
-from ..config import get_settings
+from ..config_override import get_effective as get_settings
 
 logger = logging.getLogger(__name__)
 

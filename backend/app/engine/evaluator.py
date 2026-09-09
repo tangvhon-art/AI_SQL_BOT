@@ -180,7 +180,7 @@ def _run_batch(run_id: int, llm) -> None:
                              intent_ok=d["intent_ok"], tables_hit=d["tables_hit"],
                              sql_generated=d["sql_generated"],
                              sql_executable=d["sql_executable"],
-                             sql_correct=bool(d["sql_correct"]),
+                             sql_correct=d["sql_correct"],  # 三态：True/False/None(未判定)
                              e2e_ok=d["e2e_ok"], latency_ms=d["latency_ms"],
                              llm_used=d["llm_used"], tokens_json=d["tokens"],
                              error_msg=d["error_msg"], detail_json=d["detail"])
