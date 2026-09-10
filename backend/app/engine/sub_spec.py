@@ -235,7 +235,11 @@ def _llm_extract(question: str, sub_questions: list[str], llm: Any) -> list[dict
             "1. 时间范围等公共条件不写入 metrics/dimensions\n"
             "2. metrics 指数值类统计口径（销售额/数量/占比等），dimensions 指分组分类口径（区域/门店/日期等）\n"
             "3. 无法确定时字段留空数组，不要编造\n"
-            "4. 只输出 JSON 数组，不要其他文字\n\n"
+            "4. 只输出 JSON 数组，不要其他文字\n"
+            "5. 同一原始问题拆出的多个子查询，时间口径必须一致：统一使用同一时间字段，禁止各子查询混用不同时间字段导致口径不一致\n"
+            "6. chart_hint：若子查询文本中用户明确要求某种图表（如饼图/折线图/柱状图/排行榜/KPI/雷达图等），"
+            "chart_hint 必须取对应值（pie/line/bar/rank/kpi/radar），覆盖默认意图推断；"
+            "用户未明确要求时才按意图默认（ranking→rank、trend→line、statistic→bar 等）\n\n"
             f"原始问题：{question}\n子查询列表：\n"
             + "\n".join(f"- {q}" for q in sub_questions)
         )

@@ -10,7 +10,7 @@ import re
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # ---------- 意图常量 ----------
 INTENTS = ("value", "compare", "ranking", "trend", "detail", "statistic")
@@ -77,6 +77,26 @@ class ActionSpec(BaseModel):
     percent_of: str | None = None  # 占比基数
     stat: str | None = None        # sum/avg/max/min/ratio/distinct
     detail_columns: list[str] = []  # 明细查询指定列
+
+    @field_validator("sort", mode="before")
+    @classmethod
+    def _coerce_sort(cls, v: Any) -> Any:
+        """LLM 容错：常把 sort 输出为 {'field': '某指标', 'order': 'desc'} 或
+        ['desc']，而本字段约定为字符串。此处归一为 'desc'（或 'field order'），
+        避免整份 QuerySpec 因这一个字段的 pydantic 校验失败而作废回退规则引擎。"""
+        if isinstance(v, dict):
+            order = v.get("order") or v.get("direction") or ""
+            field = v.get("field") or ""
+            if field and order:
+                return f"{field} {order}"
+            if order:
+                return str(order)
+            if field:
+                return str(field)
+            return None
+        if isinstance(v, (list, tuple)):
+            return str(v[0]) if v else None
+        return v
 
 
 class QuerySpec(BaseModel):

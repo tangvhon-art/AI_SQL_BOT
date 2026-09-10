@@ -414,6 +414,13 @@ def _extract_dimensions(question: str, candidates: dict, dim_dicts: list[dict],
         if seg not in seen or s > seen[seg][0]:
             seen[seg] = (s, d)
     ordered = sorted(seen.values(), key=lambda x: x[0], reverse=True)[:4]
+    # 表一致性：指标已锁定表（metric_tables）时，优先只保留与指标同表的维度，
+    # 防止展示与指标无关业务表的名称/维度字段。
+    if metric_tables:
+        _same_tbl = [it for it in ordered
+                     if (it[1].get("table") or "") in metric_tables]
+        if _same_tbl:
+            ordered = _same_tbl[:4]
     return [DimensionSpec(name=(d.get("comment") or d.get("column") or ""),
                           alias=d.get("column") or "", source="rule")
             for s, d in ordered]
@@ -889,6 +896,50 @@ def _resolve_schema(datasource_id: int, question: str,
     return None
 
 
+def _narrow_tables_by_hints(datasource_id: int, schema_name: str | None,
+                            hints: list[str]) -> list[str] | None:
+    """无用户确认表时，用拆表检索词命中表收窄规则引擎的候选表。
+
+    表名/表注释/字段名/字段注释做子串命中（与 NL2SQL 选表预筛一致），
+    避免规则引擎从全库候选误选无关表的字段注释（如把与问题无关业务表
+    中的枚举说明文本当成指标/维度）。
+    返回命中表名列表；无命中或命中过多（>40 张，词过泛无收窄意义）返回 None。
+    """
+    if not hints:
+        return None
+    from ..database import SessionLocal
+    from ..models import ColumnMeta
+    db = SessionLocal()
+    try:
+        q = (db.query(TableMeta)
+             .filter(TableMeta.datasource_id == datasource_id,
+                     TableMeta.deprecated.is_(False)))
+        if schema_name:
+            q = q.filter(TableMeta.schema_name == schema_name)
+        tables = q.all()
+        if not tables:
+            return None
+        hit_ids: set[int] = set()
+        for t in tables:
+            tbl_blob = f"{t.table_name} {t.comment or ''}".lower()
+            cols = (db.query(ColumnMeta)
+                    .filter(ColumnMeta.table_meta_id == t.id).all())
+            col_blob = " ".join(f"{c.column_name} {c.comment or ''}" for c in cols).lower()
+            for h in hints:
+                hl = (h or "").lower()
+                if hl and (hl in tbl_blob or hl in col_blob):
+                    hit_ids.add(t.id)
+                    break
+        if not hit_ids:
+            return None
+        hit_tables = [t.table_name for t in tables if t.id in hit_ids]
+        if len(hit_tables) > 40:
+            return None
+        return hit_tables
+    finally:
+        db.close()
+
+
 def parse_query_spec(question: str, datasource_id: int, workspace_id: int,
                      llm=None, prev_spec: QuerySpec | None = None,
                      clarify_answer: dict | None = None,
@@ -910,14 +961,11 @@ def parse_query_spec(question: str, datasource_id: int, workspace_id: int,
     """
     from ..database import SessionLocal
     schema = _resolve_schema(datasource_id, question, schema_name)
-    candidates = fetch_schema_candidates(datasource_id, schema, confirmed_tables)
-    if not candidates["metrics"] and not candidates["dimensions"]:
-        return {"status": "refuse",
-                "message": "当前数据源尚未采集到可查询的表字段（Schema），请先在「数据源」中同步 Schema。"}
 
     # 问题重构（仅首轮、未点选澄清时，LLM 可用才执行）：
     # 消歧 / 吸收负向澄清 / 提炼业务实体与派生维度 → 规范化问数描述，
     # 后续规则引擎与 LLM 解析均基于重构后文本，提升 QuerySpec 准确率与 SQL 生成可行性。
+    # 重构提前于候选拉取：拆表检索词（table_hints）用于候选表收窄。
     raw_question = question
     rewritten: dict | None = None
     if (prev_spec is None and clarify_answer is None
@@ -933,6 +981,23 @@ def parse_query_spec(question: str, datasource_id: int, workspace_id: int,
         question = str(rewritten["question"]).strip()
     else:
         logger.info("[问数][rewrite] 未重构（无LLM/多轮追问/澄清点选/模型未改写），沿用原问题")
+
+    # 无用户确认表时，用拆表检索词命中表收窄候选（防全库字段注释误配）。
+    # 有 confirmed_tables（表澄清回填）时以用户确认为准，不做收窄。
+    _candidate_tables: list[str] | None = None
+    if not confirmed_tables:
+        _hints = [h for h in (rewritten or {}).get("table_hints") or [] if h] if rewritten else []
+        if _hints:
+            _narrowed = _narrow_tables_by_hints(datasource_id, schema, _hints)
+            if _narrowed:
+                _candidate_tables = _narrowed
+                logger.info("[问数][spec] 拆表检索词命中 %d 张，候选表收窄: %s",
+                            len(_narrowed), _narrowed[:12])
+    candidates = fetch_schema_candidates(datasource_id, schema,
+                                         confirmed_tables or _candidate_tables)
+    if not candidates["metrics"] and not candidates["dimensions"]:
+        return {"status": "refuse",
+                "message": "当前数据源尚未采集到可查询的表字段（Schema），请先在「数据源」中同步 Schema。"}
 
     # LLM 优先（L-A 层）：意图/spec 抽取交 LLM，规则为兜底
     _guidance_source = "rule_fallback"

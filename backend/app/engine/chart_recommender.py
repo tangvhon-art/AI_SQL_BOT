@@ -21,6 +21,23 @@ class RecommendRule:
 
 
 # ---------- 内置规则 ----------
+class RatioPieRule(RecommendRule):
+    """占比/构成（ratio）且 2–8 行 → 饼图。
+
+    优先级高于 RankingRule：用户问「前三的占比记录」同时含排名与占比语义，
+    若按 ranking 出排行榜，占比数值既不上图也不是真正的构成展示；
+    ratio 语义下饼图更能表达占比构成。
+    行数 1 时不匹配（单值答案交给 KPI）。
+    """
+
+    def match(self, intent, metrics, dimensions, row_count, col_count,
+              ratio: bool = False):
+        return ratio and 1 < row_count <= 8 and len(metrics) >= 1 and len(dimensions) >= 1
+
+    def recommend(self):
+        return "pie"
+
+
 class RankingRule(RecommendRule):
     def match(self, intent, metrics, dimensions, row_count, col_count):
         return intent == "ranking" or "排行" in str(metrics) or "排名" in str(metrics)
@@ -135,6 +152,7 @@ class ChartRecommender:
     def _register_builtin(cls):
         """注册内置规则（按优先级降序）。"""
         builtin = [
+            (105, RatioPieRule()),
             (100, RankingRule()),
             (95, TrendRule()),
             (90, StatisticSingleRule()),
@@ -155,15 +173,27 @@ class ChartRecommender:
 
     def recommend(self, intent: str, metrics: list | None = None,
                   dimensions: list | None = None,
-                  row_count: int = 0, col_count: int = 0) -> str:
-        """推荐图表类型：遍历规则链，首个 match 的规则胜出。"""
+                  row_count: int = 0, col_count: int = 0,
+                  ratio: bool = False) -> str:
+        """推荐图表类型：遍历规则链，首个 match 的规则胜出。
+
+        ratio: 占比/构成语义提示（子查询问题含 占比/比例/构成 或 stat=ratio）。
+        """
         metrics = metrics or []
         dimensions = dimensions or []
         for _, rule in self._rules:
             try:
-                if rule.match(intent, metrics, dimensions, row_count, col_count):
+                if rule.match(intent, metrics, dimensions, row_count, col_count,
+                              ratio=ratio):
                     return rule.recommend()
-            except Exception:
+            except TypeError:
+                # 旧规则接口无 ratio 参数：退化为不带 ratio 的匹配
+                try:
+                    if rule.match(intent, metrics, dimensions, row_count, col_count):
+                        return rule.recommend()
+                except Exception:  # noqa: BLE001
+                    continue
+            except Exception:  # noqa: BLE001
                 continue
         return "bar"  # 默认柱状图
 

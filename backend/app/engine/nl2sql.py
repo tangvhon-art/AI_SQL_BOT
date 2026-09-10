@@ -135,7 +135,7 @@ LIMIT 分页参数;
     - 问「总和/总计/累计」→ SUM(数值列)；问「平均/均值」→ AVG(数值列)
     - 问「趋势/变化/按月/按日/时间分布」→ 用 DATE_FORMAT(时间列,'%Y-%m') 或 DATE(时间列) 作分组维度，加 ORDER BY 时间 ASC
     - 问「排名/前N/最多/最少/TOP」→ ORDER BY 数值列 DESC + LIMIT N
-    - 问「占比/比例/构成/百分比」→ 用 分子列/SUM(分子列) OVER() * 100 或子查询计算占比，结果保留 2 位小数
+    - 问「占比/比例/构成/百分比」→ 用 分子列/SUM(分子列) OVER() * 100 或子查询计算占比，结果保留 2 位小数；**分母必须是同口径全量统计（全部记录聚合），禁止把 TOP N 小计（含 LIMIT 的子查询/CTE）当分母**（如"前三的占比"= 前三各项 ÷ 全部记录总量，而非 ÷ 前三小计）
     - 问「对比/比较/分别/各个」→ 按维度 GROUP BY，多维度时用多列分组
     - 问「最新/最近」→ ORDER BY 时间列 DESC + LIMIT 1
 11. 结果列必须有业务含义：禁止 SELECT *（除非用户明确要全部字段）；聚合查询只返回维度列 + 指标列；查询字段较多时 LIMIT 100
@@ -143,7 +143,8 @@ LIMIT 分页参数;
 13. **时间过滤必须用左闭右开区间**：查询"今天"用 `时间列 >= CURDATE() AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`；查询"昨天"用 `时间列 >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND 时间列 < CURDATE()`；查询指定日期"9月4日"用 `时间列 >= '2026-09-04 00:00:00' AND 时间列 < '2026-09-05 00:00:00'`；**禁止** `BETWEEN '2026-09-04' AND '2026-09-04'`（同日闭区间两端都是 0 点，会漏掉全天数据）；禁止 `= '2026-09-04'`（只匹配 0 点整）
 14. **子查询过滤必须用 IN**：按名称模糊匹配项目/实体再取其 ID 过滤时，禁止 `x = (SELECT id FROM ... WHERE name LIKE ...)`（可能返回多行报 1242），必须写 `x IN (SELECT id FROM ... WHERE name LIKE ...)`
 15. **禁止对 ID/外键类字段做聚合**：id、*_id 结尾字段（主键/外键，如 project_id、req_id、api_id）只用于关联、过滤、分组，**禁止** SUM/AVG/MAX/MIN(project_id) 这类无意义聚合；聚合函数只允许作用于数值业务指标（金额/数量/时长/次数/比率/大小等）。「按X项目」「查X项目/项目下的Y」是维度筛选（WHERE 项目名 LIKE + GROUP BY 项目名/名称列），不是对项目ID求和
-16. **不得自行脑补过滤条件**：WHERE / HAVING 条件必须严格来自用户问题中**明确声明**的筛选要求（如"状态=已通过"、"近7日"、"项目名包含X"等）；**禁止**自行添加用户未提及的过滤条件（如 `status = 1`、`is_active = 1`、`type = 'xxx'`、部门/人员限制等），即使字段注释暗示了业务含义或"看起来应该过滤"。若用户问题未提及某字段，则该字段不得出现在 WHERE / HAVING 中（软删 `is_deleted = 0` 按规则 7 自动处理，不在此限）；时间范围仅在用户明确提及时添加（如"近7日"、"今天"、"9月"）"""
+16. **不得自行脑补过滤条件**：WHERE / HAVING 条件必须严格来自用户问题中**明确声明**的筛选要求（如"状态=已通过"、"近7日"、"项目名包含X"等）；**禁止**自行添加用户未提及的过滤条件（如 `status = 1`、`is_active = 1`、`type = 'xxx'`、部门/人员限制等），即使字段注释暗示了业务含义或"看起来应该过滤"。若用户问题未提及某字段，则该字段不得出现在 WHERE / HAVING 中（软删 `is_deleted = 0` 按规则 7 自动处理，不在此限）；时间范围仅在用户明确提及时添加（如"近7日"、"今天"、"9月"）
+17. **多子查询时间口径必须一致**：同一问题拆出的多个子查询，时间字段必须统一，禁止混用不同时间字段（如一个用开始时间、另一个用创建时间）导致口径不一致；按日期分组时也要用同一时间字段做 DATE_FORMAT"""
 
 
 def _schema_text(datasource_id: int, top_tables: list[TableMeta] | None = None,
@@ -780,7 +781,7 @@ def _unexpected_filter_error(sql: str, question: str) -> str | None:
     # 软删字段豁免（规则 7 自动注入）
     col_names.discard("is_deleted")
     col_names.discard("deleted")
-    # 常见脑补字段 → 用户问题中应出现的中文关键词（不含"发起"，避免"发起量"误豁免）
+    # 常见脑补字段 → 用户问题中应出现的中文关键词（关键词不宜过泛，避免被常见词误豁免）
     suspect: dict[str, list[str]] = {
         "status": ["状态", "已结束", "处理中", "未通过", "撤销", "完成", "待审", "审批中", "通过", "驳回", "已办", "待办"],
         "state": ["状态", "已结束", "处理中", "完成"],
@@ -793,8 +794,64 @@ def _unexpected_filter_error(sql: str, question: str) -> str | None:
     for field, keywords in suspect.items():
         if field in col_names and not any(kw in question for kw in keywords):
             return (f"SQL 的 WHERE 中包含用户问题未提及的过滤字段 `{field}`。"
-                    f"用户问题未要求按此字段筛选，请移除该条件；"
-                    f"若确实需要，请在问题中明确说明（如「状态=已结束」）。")
+                    f"请直接删除该过滤条件，不要在 WHERE 中添加任何用户问题未提及的字段；"
+                    f"若确实需要过滤，请在问题中明确说明（如「状态=已结束」）。")
+    return None
+
+
+def _ratio_denominator_error(sql: str, question: str,
+                             spec_context: dict | None = None) -> str | None:
+    """占比口径校验：占比（占比/比例/构成/百分比）的分母必须是同口径全量统计。
+
+    禁止用 TOP N 小计做分母——典型错误形态：
+    WITH daily_stats AS (… LIMIT 3) SELECT …, ROUND(x * 100.0 / (SELECT SUM(x) FROM daily_stats), 2)
+    此时 daily_stats 只含前三，占比=前三占前三（合计恒 100%），与用户要的"占总量比例"无关。
+    检测：除法分母是标量子查询，且该子查询自身含 LIMIT，或其 FROM 引用的 CTE 含 LIMIT。
+    """
+    ratio_words = ("占比", "比例", "构成", "百分比", "份额", "比重")
+    if not any(w in question for w in ratio_words):
+        if spec_context:
+            act = (spec_context.get("spec") or {}).get("action") or {}
+            if str(act.get("stat") or "") != "ratio":
+                return None
+        else:
+            return None
+    import sqlglot
+    import sqlglot.expressions as exp
+    try:
+        ast = sqlglot.parse_one(sql, read="mysql")
+    except Exception:  # noqa: BLE001
+        return None
+    # 含 LIMIT 的 CTE 名集合（TOP N 小计）
+    limited_ctes: set[str] = set()
+    for cte in ast.find_all(exp.CTE):
+        body = cte.this if isinstance(cte.this, exp.Query) else None
+        if body is not None and list(body.find_all(exp.Limit)):
+            try:
+                limited_ctes.add(cte.alias_or_name)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _denom_is_limited(right: exp.Expression) -> bool:
+        subs = [right] if isinstance(right, exp.Subquery) else list(right.find_all(exp.Subquery))
+        for sq in subs:
+            if list(sq.find_all(exp.Limit)):
+                return True
+            for tbl in sq.find_all(exp.Table):
+                if tbl.name in limited_ctes:
+                    return True
+        return False
+
+    for div in ast.find_all(exp.Div):
+        right = getattr(div, "expression", None)
+        if right is None:
+            continue
+        if _denom_is_limited(right):
+            return ("占比（占比/比例/构成/百分比）的分母必须是同口径全量统计："
+                    "禁止把 TOP N 小计（含 LIMIT 的子查询/CTE）作为分母——"
+                    "这会导致前三的占比合计恒为 100%，而不是占全部记录的真正比例。"
+                    "请改为对全部记录的全量聚合作为分母"
+                    "（如 SUM(COUNT(*)) OVER () 全量窗口，或对不含 LIMIT 的全量结果求和）。")
     return None
 
 
@@ -965,6 +1022,30 @@ def _apply_column_aliases(sql: str, datasource_id: int) -> str:
     if not modified:
         return sql
     return ast.sql(dialect="mysql", pretty=False)
+
+
+# 全角标点 → 半角映射（LLM 输出常混入全角逗号/括号导致 SQL 语法错误）
+_FULLWIDTH_MAP = {
+    "，": ",", "；": ";", "：": ":", "（": "(", "）": ")",
+    "“": '"', "”": '"', "‘": "'", "’": "'", "、": ",", "。": ".",
+    "！": "!", "？": "?", "　": " ",
+}
+
+
+def _normalize_sql_punctuation(sql: str) -> str:
+    """将 SQL 中的全角标点归一为半角（如别名后误用全角逗号会导致解析失败）。
+
+    跳过单引号字符串字面量内部，避免改写 LIKE 等字面量中的真实内容。
+    """
+    out: list[str] = []
+    in_str = False
+    for ch in sql:
+        if ch == "'":
+            in_str = not in_str
+            out.append(ch)
+            continue
+        out.append(ch if in_str else _FULLWIDTH_MAP.get(ch, ch))
+    return "".join(out)
 
 
 def generate_sql(datasource_id: int, workspace_id: int, question: str,
@@ -1235,7 +1316,7 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
             continue
 
         # 从回答中提取 SQL（markdown ```sql 代码块优先，兜底裸 SELECT）
-        sql = extract_first_sql(content) or ""
+        sql = _normalize_sql_punctuation(extract_first_sql(content) or "")
         # 排查辅助：每次 LLM 响应全文打印到日志（含提取结果）
         logger.info("[NL2SQL] 第 %d 次尝试, 提取=%s\n-----响应原文-----\n%s\n-----END-----",
                     i + 1, "OK" if sql else "未提取到SQL", content)
@@ -1270,6 +1351,9 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
             filter_err = _unexpected_filter_error(sql, question)
             if filter_err:
                 raise ValueError(filter_err)
+            ratio_err = _ratio_denominator_error(sql, question, spec_context)
+            if ratio_err:
+                raise ValueError(ratio_err)
             sql = _apply_column_aliases(sql, datasource_id)
             yield {"type": "result", "result": {
                 "intent": "query", "sql": sql,
@@ -1641,7 +1725,7 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
             continue
 
         # 从回答中提取 SQL（markdown ```sql 代码块优先，兜底裸 SELECT）
-        sql = extract_first_sql(content) or ""
+        sql = _normalize_sql_punctuation(extract_first_sql(content) or "")
         # 排查辅助：每次 LLM 响应全文打印到日志（含提取结果）
         logger.info("[NL2SQL] 第 %d 次尝试, 提取=%s\n-----响应原文-----\n%s\n-----END-----",
                     i + 1, "OK" if sql else "未提取到SQL", content)
@@ -1676,6 +1760,9 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
             filter_err = _unexpected_filter_error(sql, question)
             if filter_err:
                 raise ValueError(filter_err)
+            ratio_err = _ratio_denominator_error(sql, question, spec_context)
+            if ratio_err:
+                raise ValueError(ratio_err)
             sql = _apply_column_aliases(sql, datasource_id)
             yield {"type": "result", "result": {
                 "intent": "query", "sql": sql,
@@ -1836,7 +1923,16 @@ def _check_columns_exist(sql: str, datasource_id: int) -> None:
                 available = ", ".join(sorted(cols_of[rt]))
                 hints.append(f"{rt} 可用列: {available}")
         hint_str = ("；" + "；".join(hints)) if hints else ""
+        # 软删类字段（is_deleted 等）是高频幻觉列：表中没有时直接要求删除全部引用，
+        # 避免模型改用其他字段替代或反复重试
+        soft_cols = [u for u in sorted(set(unknown))
+                     if u.lower() in ("is_deleted", "deleted", "delete_flag")]
+        extra = ""
+        if soft_cols:
+            extra = ("；注意：以上表中不存在 " + "、".join(soft_cols)
+                     + " 字段，请直接删除 SQL 中所有对该字段的引用（如 WHERE 条件），"
+                       "不要尝试用其他字段替代")
         raise SqlExecError(
             "字段不存在：" + ", ".join(sorted(set(unknown)))
-            + hint_str
+            + hint_str + extra
             + "；请使用上表中的确切字段名修正 SQL")

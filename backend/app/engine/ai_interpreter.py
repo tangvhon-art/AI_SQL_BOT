@@ -99,10 +99,15 @@ class AiInterpreter:
 
         yield {"type": "ai_interpretation_start", "template_name": template_name}
 
-        # 4. 调用 LLM（流式）
+        # 4. 调用 LLM（流式）：提示词作为 system prompt，原始问题+数据作为 user 消息
+        # （部分 LLM 网关要求消息列表必须含 user 消息）
         full_text = ""
         try:
-            for delta in self._llm_stream(prompt):
+            for delta in self._llm_stream(
+                    prompt,
+                    question=question,
+                    data_summary=data_summary,
+                    metrics_json=json.dumps(metrics, ensure_ascii=False, default=str)):
                 full_text += delta
                 yield {"type": "ai_interpretation", "delta": delta, "raw_text": full_text}
         except Exception as exc:  # noqa: BLE001
@@ -128,9 +133,25 @@ class AiInterpreter:
 
     # ---------- 内部方法 ----------
 
-    def _llm_stream(self, prompt: str) -> Generator[str, None, None]:
-        """调用 LLM 流式接口，yield 增量文本。提示词作为 system prompt 下发。"""
-        messages = [{"role": "system", "content": prompt}]
+    def _llm_stream(self, prompt: str, question: str = "",
+                    data_summary: str = "", metrics_json: str = "") -> Generator[str, None, None]:
+        """调用 LLM 流式接口，yield 增量文本。
+
+        消息结构：提示词模板作为 system prompt 下发（「用所选提示词作为 system prompt 解读」），
+        原始问题 + 数据摘要 + 关键指标作为 user 消息（部分 LLM 网关要求消息列表必须含 user 消息）。
+        """
+        user_parts = []
+        if question:
+            user_parts.append(f"原始问题：{question}")
+        if data_summary:
+            user_parts.append(f"数据摘要：\n{data_summary}")
+        if metrics_json and metrics_json.strip() not in ("", "[]"):
+            user_parts.append(f"关键指标：{metrics_json}")
+        user_content = "\n".join(user_parts) if user_parts else "请基于以上数据进行分析并输出结果。"
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": user_content},
+        ]
         try:
             for chunk in self.llm.chat_stream(messages, temperature=0.3, thinking=False):
                 delta = chunk.get("content") or ""

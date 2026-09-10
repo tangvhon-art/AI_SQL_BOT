@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     cors_origins: str = "*"
     query_timeout_seconds: int = 30
     query_max_rows: int = 1000
-    sql_correct_retries: int = 2
+    sql_correct_retries: int = 3            # SQL 生成/修正重试次数（内部循环 = 重试+1 次尝试）
 
     # ===== 能力补建配置（C1/C2/C3/C4/C6/C7/C8/C11/C14）=====
     # C1 缓存
