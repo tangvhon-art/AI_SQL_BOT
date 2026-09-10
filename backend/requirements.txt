@@ -9,3 +9,4 @@ pydantic-settings>=2.3
 sqlglot>=25.0
 httpx>=0.27
 python-multipart>=0.0.9
+numpy>=2.0
