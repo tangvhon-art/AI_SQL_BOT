@@ -33,6 +33,11 @@ export interface SSEHandlers {
   onSubResult?: (payload: Record<string, unknown>) => void
   onSubError?: (payload: Record<string, unknown>) => void
   onDashboard?: (payload: Record<string, unknown>) => void
+  // 多查询 V2.0（两阶段协同编排）
+  onMultiTask?: (payload: { task_id: string }) => void
+  onMultiRejected?: (payload: { code: string; msg: string }) => void
+  onSubProgress?: (payload: { sub_id: string; stage: string; msg: string }) => void
+  onMultiError?: (payload: { code: string; msg: string }) => void
   // AI 解读
   onAiInterpretationStart?: (payload: Record<string, unknown>) => void
   onAiInterpretation?: (payload: Record<string, unknown>) => void
@@ -40,20 +45,62 @@ export interface SSEHandlers {
   onAiInterpretationError?: (payload: Record<string, unknown>) => void
 }
 
-export async function postChatStream(
-  body: {
-    conversation_id?: number | null
-    question: string
-    datasource_id?: number | null
-    schema_name?: string | null
-    model_id?: number | null
-    file_ids?: string[] | null
-    doc_session_id?: string | null
-  },
+/** 解析单个 SSE 数据块并分发到对应 handler（postChatStream / postMultiStream 共用） */
+function dispatchSSE(block: string, handlers: SSEHandlers): void {
+  let event = 'message'
+  let data = ''
+  for (const line of block.split('\n')) {
+    if (line.startsWith('event:')) event = line.slice(6).trim()
+    else if (line.startsWith('data:')) data += line.slice(5).trim()
+  }
+  if (!data) return
+  let payload: Record<string, unknown>
+  try {
+    payload = JSON.parse(data)
+  } catch {
+    return
+  }
+  switch (event) {
+    case 'progress': handlers.onProgress?.(String(payload.stage ?? ''), String(payload.msg ?? '')); break
+    case 'sql': handlers.onSql?.(payload as never); break
+    case 'execute': handlers.onExecute?.(payload); break
+    case 'table': handlers.onTable?.(payload as never); break
+    case 'chart': handlers.onChart?.(payload); break
+    case 'spec': handlers.onSpec?.(payload); break
+    case 'trace': handlers.onTrace?.(payload); break
+    case 'summary': handlers.onSummary?.(payload as never); break
+    case 'error': handlers.onError?.(payload as never); break
+    case 'done': handlers.onDone?.(); break
+    case 'conv_id': handlers.onConvId?.(Number(payload.conversation_id)); break
+    case 'stream': handlers.onStream?.(String(payload.delta ?? '')); break
+    case 'thinking': handlers.onThinking?.(String(payload.delta ?? '')); break
+    case 'answer': handlers.onAnswer?.(String(payload.delta ?? '')); break
+    case 'references': handlers.onReferences?.(payload.references as never); break
+    // 多查询
+    case 'multi_spec': handlers.onMultiSpec?.(payload); break
+    case 'multi_task': handlers.onMultiTask?.(payload as never); break
+    case 'multi_rejected': handlers.onMultiRejected?.(payload as never); break
+    case 'sub_progress': handlers.onSubProgress?.(payload as never); break
+    case 'sub_sql': handlers.onSubSql?.(payload); break
+    case 'sub_result': handlers.onSubResult?.(payload); break
+    case 'sub_error': handlers.onSubError?.(payload); break
+    case 'dashboard': handlers.onDashboard?.(payload); break
+    // AI 解读
+    case 'ai_interpretation_start': handlers.onAiInterpretationStart?.(payload); break
+    case 'ai_interpretation': handlers.onAiInterpretation?.(payload); break
+    case 'ai_interpretation_done': handlers.onAiInterpretationDone?.(payload); break
+    case 'ai_interpretation_error': handlers.onAiInterpretationError?.(payload); break
+  }
+}
+
+/** 通用 SSE 请求：POST 指定路径并解析事件流（chat / multi confirm / multi retry 共用） */
+export async function postSseStream(
+  url: string,
+  body: Record<string, unknown>,
   handlers: SSEHandlers,
 ): Promise<void> {
   const token = localStorage.getItem(TOKEN_KEY)
-  const resp = await fetch('/api/v1/chat', {
+  const resp = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -68,50 +115,6 @@ export async function postChatStream(
   const reader = resp.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
-  // 解析 SSE：按空行分隔 event/data
-  const dispatch = (block: string) => {
-    let event = 'message'
-    let data = ''
-    for (const line of block.split('\n')) {
-      if (line.startsWith('event:')) event = line.slice(6).trim()
-      else if (line.startsWith('data:')) data += line.slice(5).trim()
-    }
-    if (!data) return
-    let payload: Record<string, unknown>
-    try {
-      payload = JSON.parse(data)
-    } catch {
-      return
-    }
-    switch (event) {
-      case 'progress': handlers.onProgress?.(String(payload.stage ?? ''), String(payload.msg ?? '')); break
-      case 'sql': handlers.onSql?.(payload as never); break
-      case 'execute': handlers.onExecute?.(payload); break
-      case 'table': handlers.onTable?.(payload as never); break
-      case 'chart': handlers.onChart?.(payload); break
-      case 'spec': handlers.onSpec?.(payload); break
-      case 'trace': handlers.onTrace?.(payload); break
-      case 'summary': handlers.onSummary?.(payload as never); break
-      case 'error': handlers.onError?.(payload as never); break
-      case 'done': handlers.onDone?.(); break
-      case 'conv_id': handlers.onConvId?.(Number(payload.conversation_id)); break
-      case 'stream': handlers.onStream?.(String(payload.delta ?? '')); break
-      case 'thinking': handlers.onThinking?.(String(payload.delta ?? '')); break
-      case 'answer': handlers.onAnswer?.(String(payload.delta ?? '')); break
-      case 'references': handlers.onReferences?.(payload.references as never); break
-      // 多查询
-      case 'multi_spec': handlers.onMultiSpec?.(payload); break
-      case 'sub_sql': handlers.onSubSql?.(payload); break
-      case 'sub_result': handlers.onSubResult?.(payload); break
-      case 'sub_error': handlers.onSubError?.(payload); break
-      case 'dashboard': handlers.onDashboard?.(payload); break
-      // AI 解读
-      case 'ai_interpretation_start': handlers.onAiInterpretationStart?.(payload); break
-      case 'ai_interpretation': handlers.onAiInterpretation?.(payload); break
-      case 'ai_interpretation_done': handlers.onAiInterpretationDone?.(payload); break
-      case 'ai_interpretation_error': handlers.onAiInterpretationError?.(payload); break
-    }
-  }
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -120,8 +123,32 @@ export async function postChatStream(
     while ((idx = buffer.indexOf('\n\n')) >= 0) {
       const block = buffer.slice(0, idx)
       buffer = buffer.slice(idx + 2)
-      dispatch(block)
+      dispatchSSE(block, handlers)
     }
   }
-  if (buffer.trim()) dispatch(buffer)
+  if (buffer.trim()) dispatchSSE(buffer, handlers)
+}
+
+/** 多查询 confirm / retry：携带 token 的 SSE POST 流 */
+export async function postMultiStream(
+  url: string,
+  body: Record<string, unknown>,
+  handlers: SSEHandlers,
+): Promise<void> {
+  await postSseStream(url, body, handlers)
+}
+
+export async function postChatStream(
+  body: {
+    conversation_id?: number | null
+    question: string
+    datasource_id?: number | null
+    schema_name?: string | null
+    model_id?: number | null
+    file_ids?: string[] | null
+    doc_session_id?: string | null
+  },
+  handlers: SSEHandlers,
+): Promise<void> {
+  await postSseStream('/api/v1/chat', body as Record<string, unknown>, handlers)
 }

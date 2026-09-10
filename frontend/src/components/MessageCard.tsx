@@ -8,20 +8,34 @@ import type { ChatMsg } from '../types'
 import ChartCard from './ChartCard'
 import SqlBlock from './SqlBlock'
 import { Dashboard, convertDashboardEvent } from './dashboard/Dashboard'
+import MultiSpecPreview from './dashboard/MultiSpecPreview'
+import MultiExecProgress from './dashboard/MultiExecProgress'
 import { AiInterpretation } from './dashboard/AiInterpretation'
-import type { InterpretationResult } from '../types/chart'
+import { useMultiQueryStore } from '../stores/multiQuery'
+import type { InterpretationResult, SubQuerySpec } from '../types/chart'
 
-// Dashboard + AI 解读组合块
-function DashboardBlock({ dashboard, aiInterpretation, aiLoading }: {
+// Dashboard + AI 解读组合块（V2：总览解读 + 单卡重试）
+function DashboardBlock({ dashboard, aiInterpretation, aiLoading, onRetryCard, retryDisabled }: {
   dashboard: Record<string, unknown>
   aiInterpretation?: Record<string, unknown>
   aiLoading?: boolean
+  onRetryCard?: (subId: string) => void
+  retryDisabled?: (subId: string) => boolean
 }) {
   const data = convertDashboardEvent(dashboard)
   const interpretation = aiInterpretation as InterpretationResult | undefined
+  const overview = String((dashboard as Record<string, unknown>).overview ?? '')
   return (
     <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <Dashboard data={data} showToolbar={false} />
+      {overview ? (
+        <div style={{
+          padding: '10px 14px', background: '#F5F3FF', borderRadius: 10,
+          border: '1px solid #EDEAFD', fontSize: 13.5, color: '#4B3FD4', lineHeight: 1.6,
+        }}>
+          {overview}
+        </div>
+      ) : null}
+      <Dashboard data={data} showToolbar={false} onRetryCard={onRetryCard} retryDisabled={retryDisabled} />
       {(interpretation || aiLoading) && (
         <AiInterpretation result={interpretation} loading={aiLoading} rawText={interpretation?.rawText} />
       )}
@@ -34,6 +48,15 @@ interface Props {
   onSaveQuery?: (msg: ChatMsg) => void
   onFeedback?: (msgId: number | undefined, feedback: string) => void
   onClarifyConfirm?: (tables: string[], originalQuestion: string) => void
+  /** 多查询 V2：确认执行（Phase A → B） */
+  onMultiConfirm?: (subs: SubQuerySpec[]) => void
+  /** 多查询 V2：单卡重试 */
+  onRetryCard?: (subId: string) => void
+  /** 多查询 V2：整体取消 */
+  onCancelMulti?: () => void
+  /** 多查询 V2：重试防抖 */
+  retryDisabled?: (subId: string) => boolean
+  multiCancelLoading?: boolean
 }
 
 // AI 回复正文：Markdown 渲染（支持标题/列表/表格/代码块/引用）
@@ -214,8 +237,32 @@ function ClarifyCard({ text, candidates, originalQuestion, kind, onConfirm }: {
   )
 }
 
-export default function MessageCard({ msg, onSaveQuery, onFeedback, onClarifyConfirm }: Props) {
+export default function MessageCard({
+  msg, onSaveQuery, onFeedback, onClarifyConfirm,
+  onMultiConfirm, onRetryCard, onCancelMulti, retryDisabled, multiCancelLoading,
+}: Props) {
   const c = (msg.content ?? {}) as Record<string, unknown>
+  // 多查询 V2 状态（预览/执行进度由全局 store 驱动）
+  const multiPhase = useMultiQueryStore((s) => s.phase)
+  const preview = useMultiQueryStore((s) => s.preview)
+  const confirmLoading = useMultiQueryStore((s) => s.confirmLoading)
+
+  // Phase A 拆解预览面板（消息为 multi_preview 或恢复历史预览）
+  const previewPayload = c.multi_spec as Record<string, unknown> | undefined
+  if (msg.content_type === 'multi_preview' || (c.mode === 'multi_preview' && previewPayload)) {
+    const subs = (previewPayload?.sub_queries ?? []) as SubQuerySpec[]
+    const list = subs.length ? subs : preview
+    if (list.length) {
+      return (
+        <MultiSpecPreview
+          subQueries={list}
+          confirming={confirmLoading}
+          onConfirm={(confirmed) => onMultiConfirm?.(confirmed)}
+          onCancel={onCancelMulti}
+        />
+      )
+    }
+  }
 
   if (msg.role === 'user') {
     return (
@@ -295,18 +342,14 @@ export default function MessageCard({ msg, onSaveQuery, onFeedback, onClarifyCon
     const anomalies = (c.anomalies ?? []) as Array<{ type: string; desc: string }>
     const querySpec = (c.query_spec ?? {}) as Record<string, unknown>
     const trace = (c.trace ?? {}) as Record<string, unknown>
-    // 多查询模式：已收到 multi_spec 但 dashboard 数据尚未到达 → 显示 loading，不提前渲染不完整内容
-    const isMultiQueryLoading = !!c.multi_spec && !c.dashboard && !c.sub_error
-    if (isMultiQueryLoading) {
+    // 多查询 V2：执行阶段 → 实时进度面板（store 驱动）；未确认预览 → 预览面板（上面已处理）
+    if (multiPhase === 'executing' && !c.dashboard) {
       return (
-        <div className="glass-msg-assistant" style={{ margin: '10px 0', padding: '20px 16px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Spin size="small" />
-            <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-              正在生成多查询结果（拆解 → 生成 SQL → 执行 → 编排图表）…
-            </Typography.Text>
-          </div>
-        </div>
+        <MultiExecProgress
+          onRetryCard={onRetryCard}
+          onCancelAll={onCancelMulti}
+          cancelLoading={multiCancelLoading}
+        />
       )
     }
     return (
@@ -404,12 +447,14 @@ export default function MessageCard({ msg, onSaveQuery, onFeedback, onClarifyCon
         {chart.type === 'metric' || chart.option || chart.type === 'table' ? (
           !c.dashboard ? <ChartCard chart={chart as never} /> : null
         ) : null}
-        {/* 多查询 Dashboard 模式 */}
+        {/* 多查询 Dashboard 模式（V2：总览 + 单卡重试） */}
         {c.dashboard ? (
           <DashboardBlock
             dashboard={c.dashboard as never}
             aiInterpretation={c.ai_interpretation as never}
             aiLoading={!!c.ai_interpretation_loading}
+            onRetryCard={onRetryCard}
+            retryDisabled={retryDisabled}
           />
         ) : null}
         {c.sql ? <SqlBlock sql={String(c.sql)} permission={String(c.permission ?? '')} /> : null}

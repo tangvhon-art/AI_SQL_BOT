@@ -1,0 +1,204 @@
+// Phase A 拆解预览面板：子查询列表（勾选/编辑/删除/新增）+ 确认/重拆/取消
+// 组件持有本地可编辑清单，确认时把最终清单交给父层 → confirm 接口进入 Phase B
+import { useEffect, useState } from 'react'
+import {
+  Alert, Button, Checkbox, Input, Space, Tag, Tooltip, Typography,
+} from 'antd'
+import {
+  DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined,
+  CheckOutlined, CloseOutlined,
+} from '@ant-design/icons'
+import type { SubQuerySpec } from '../../types/chart'
+
+const INTENT_LABELS: Record<string, string> = {
+  value: '数值', compare: '对比', ranking: '排行',
+  trend: '趋势', detail: '明细', statistic: '统计',
+}
+
+interface Props {
+  subQueries: SubQuerySpec[]
+  confirming?: boolean
+  onConfirm: (subs: SubQuerySpec[]) => void
+  onRegen?: () => void
+  onCancel?: () => void
+}
+
+export default function MultiSpecPreview({
+  subQueries, confirming, onConfirm, onRegen, onCancel,
+}: Props) {
+  // 本地可编辑清单（初始来自拆解结果，用户编辑只影响本组件）
+  const [items, setItems] = useState<SubQuerySpec[]>(subQueries)
+  useEffect(() => { setItems(subQueries) }, [subQueries])
+
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [draft, setDraft] = useState({ question: '', title: '' })
+
+  const enabledCount = items.filter((q) => q.enabled !== false).length
+
+  const startEdit = (q: SubQuerySpec) => {
+    setEditingId(q.sub_id)
+    setDraft({ question: q.question, title: q.title ?? '' })
+  }
+  const commitEdit = () => {
+    setItems((prev) => prev.map((q) =>
+      q.sub_id === editingId ? { ...q, question: draft.question.trim() || q.question, title: draft.title.trim() || q.title } : q))
+    setEditingId(null)
+  }
+  const patch = (subId: string, p: Partial<SubQuerySpec>) =>
+    setItems((prev) => prev.map((q) => (q.sub_id === subId ? { ...q, ...p } : q)))
+
+  const fmtTime = (q: SubQuerySpec) => {
+    const expr = q.time?.expr
+    const start = q.time?.start
+    const end = q.time?.end
+    if (expr) return expr
+    if (start && end) return `${start}~${end}`
+    return ''
+  }
+  const fmtMetrics = (q: SubQuerySpec) => (q.metrics ?? []).map((m) => m.name).filter(Boolean).join('、')
+  const fmtDims = (q: SubQuerySpec) => (q.dimensions ?? []).map((d) => d.name).filter(Boolean).join('、')
+
+  const lowConfidence = (q: SubQuerySpec) =>
+    typeof q.confidence === 'number' && q.confidence < 0.5
+
+  return (
+    <div className="glass-msg-assistant" style={{ margin: '10px 0', padding: '14px 16px', maxWidth: '100%' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <Space size={8}>
+          <Tag color="purple" style={{ marginInlineEnd: 0 }}>拆解确认</Tag>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            已拆解为 {items.length} 个子查询，请确认后执行
+          </Typography.Text>
+        </Space>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          已启用 {enabledCount} 个
+        </Typography.Text>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {items.map((q) => {
+          const enabled = q.enabled !== false
+          const editing = editingId === q.sub_id
+          return (
+            <div
+              key={q.sub_id}
+              style={{
+                border: '1px solid #EDEAFD', borderRadius: 8, padding: '10px 12px',
+                background: enabled ? '#FAFAFE' : '#F5F5F5',
+                opacity: enabled ? 1 : 0.62,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                <Checkbox
+                  checked={enabled}
+                  onChange={(e) => patch(q.sub_id, { enabled: e.target.checked })}
+                  style={{ marginTop: 3 }}
+                />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  {editing ? (
+                    <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                      <Input
+                        size="small" placeholder="子问题（完整可独立执行的查询）"
+                        value={draft.question}
+                        onChange={(e) => setDraft((d) => ({ ...d, question: e.target.value }))}
+                        maxLength={200}
+                      />
+                      <Input
+                        size="small" placeholder="卡片标题"
+                        value={draft.title}
+                        onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))}
+                        maxLength={30}
+                      />
+                      <Space size={4}>
+                        <Button size="small" type="primary" icon={<CheckOutlined />} onClick={commitEdit}>
+                          保存
+                        </Button>
+                        <Button size="small" icon={<CloseOutlined />} onClick={() => setEditingId(null)}>
+                          取消
+                        </Button>
+                      </Space>
+                    </Space>
+                  ) : (
+                    <>
+                      <div style={{ fontSize: 13.5, fontWeight: 600, color: '#1A1B1C', lineHeight: 1.5 }}>
+                        {q.title || q.question}
+                        {enabled ? null : (
+                          <Tag color="default" style={{ marginLeft: 8, fontSize: 11 }}>已停用</Tag>
+                        )}
+                      </div>
+                      <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+                        <Tag color="blue" style={{ fontSize: 11, marginInlineEnd: 0 }}>
+                          {INTENT_LABELS[q.intent] ?? q.intent}
+                        </Tag>
+                        {fmtMetrics(q) ? (
+                          <Typography.Text style={{ fontSize: 12, color: '#555' }}>
+                            指标：{fmtMetrics(q)}
+                          </Typography.Text>
+                        ) : null}
+                        {fmtDims(q) ? (
+                          <Typography.Text style={{ fontSize: 12, color: '#555' }}>
+                            维度：{fmtDims(q)}
+                          </Typography.Text>
+                        ) : null}
+                        {fmtTime(q) ? (
+                          <Typography.Text style={{ fontSize: 12, color: '#555' }}>
+                            时间：{fmtTime(q)}
+                          </Typography.Text>
+                        ) : null}
+                        {q.chart_hint ? (
+                          <Tag color="green" style={{ fontSize: 11, marginInlineEnd: 0 }}>
+                            {q.chart_hint}
+                          </Tag>
+                        ) : null}
+                      </div>
+                      {lowConfidence(q) ? (
+                        <Alert
+                          type="warning" showIcon style={{ marginTop: 6, padding: '2px 10px', fontSize: 12 }}
+                          message={<span style={{ fontSize: 12 }}>未识别到完整指标/维度，可编辑补全</span>}
+                        />
+                      ) : null}
+                    </>
+                  )}
+                </div>
+                <Space size={2}>
+                  <Tooltip title="编辑">
+                    <Button size="small" type="text" icon={<EditOutlined />} onClick={() => startEdit(q)} />
+                  </Tooltip>
+                  <Tooltip title="删除">
+                    <Button size="small" type="text" danger icon={<DeleteOutlined />}
+                      onClick={() => setItems((prev) => prev.filter((x) => x.sub_id !== q.sub_id))} />
+                  </Tooltip>
+                </Space>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      <Space style={{ marginTop: 12 }} wrap size={8}>
+        <Button size="small" icon={<PlusOutlined />}
+          onClick={() => setItems((prev) => [...prev, {
+            sub_id: `q${prev.length + 1}`, question: '', intent: 'value',
+            metrics: [], dimensions: [], filters: [], time: {},
+            confidence: 0.3, enabled: true,
+          }])}>
+          新增子查询
+        </Button>
+        {onRegen ? (
+          <Button size="small" icon={<ReloadOutlined />} onClick={onRegen}>重新拆解</Button>
+        ) : null}
+        {onCancel ? (
+          <Button size="small" onClick={onCancel}>取消</Button>
+        ) : null}
+        <Button
+          type="primary" size="small"
+          loading={confirming}
+          disabled={enabledCount === 0}
+          onClick={() => onConfirm(items.filter((q) => q.enabled !== false))}
+        >
+          确认执行（{enabledCount}）
+        </Button>
+      </Space>
+    </div>
+  )
+}

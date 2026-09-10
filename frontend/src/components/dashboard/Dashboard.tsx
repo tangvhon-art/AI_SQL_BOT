@@ -1,63 +1,51 @@
 /**
- * Dashboard 容器：多查询结果汇总展示
+ * Dashboard 容器：多查询结果汇总展示（V2：支持卡片执行中/错误/取消态 + 单卡重试 + 解读/异常/溯源）
  * 12栅格自动布局，支持 KPI 卡片 + 图表卡片混合
- * 智能图表类型推荐：根据数据特征自动选择 KPI/折线/柱状/分组柱状
  */
 import React from 'react';
-import { Row, Col, Button, Space, Tooltip } from 'antd';
-import { SaveOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Row, Col, Button, Space, Tooltip, Spin, Alert, Tag, Collapse, Typography, Descriptions } from 'antd';
+import { SaveOutlined, ReloadOutlined, RetweetOutlined } from '@ant-design/icons';
 import { ChartCard } from './ChartCard';
 import { KpiCard, KpiGroupCard } from './KpiCard';
 import { recommendLayout } from '../../utils/layout-engine';
-import { adaptQueryResult } from '../../utils/chart-adapter';
+import { adaptQueryResult, formatNumber } from '../../utils/chart-adapter';
 import type { DashboardData, ChartCardConfig, ChartType } from '../../types/chart';
+
+const KPI_COLORS = ['#6C5CE7', '#10B981', '#F97316', '#F59E0B', '#EC4899', '#14B8A6'];
 
 interface DashboardProps {
   data: DashboardData;
   onSaveReport?: () => void;
   onRefresh?: () => void;
   showToolbar?: boolean;
+  /** 单卡重试（error 卡片） */
+  onRetryCard?: (subId: string) => void;
+  /** 重试防抖：返回当前是否可重试 */
+  retryDisabled?: (subId: string) => boolean;
 }
 
 /**
  * 智能图表类型推荐：根据数据特征自动选择
- * - 1行1列（单值）→ kpi
- * - 1行多列 → kpi_group
- * - 多行且第一列含时间关键词 → line
- * - 多行1列 → bar（排行榜风格）
- * - 多行多列 → group_bar
  */
 function recommendChartType(card: ChartCardConfig): ChartType {
   const { dataset } = card;
   const rowCount = dataset.rows.length;
   const colCount = dataset.dimensions.length + dataset.metrics.length;
 
-  // 空数据保持原类型
   if (rowCount === 0) return card.chartType;
-
-  // 单值 → KPI
   if (rowCount === 1 && dataset.metrics.length === 1) return 'kpi';
-
-  // 单行多指标 → KPI 组
   if (rowCount === 1 && dataset.metrics.length > 1) return 'kpi_group';
 
-  // 多行：检查第一列是否含时间关键词
   const timeKeywords = ['时间', '日期', '月', '日', '年', '周', '季度', 'date', 'time', 'month', 'day', 'year'];
   const firstDim = dataset.dimensions[0]?.toLowerCase() || '';
   const isTimeSeries = timeKeywords.some((k) => firstDim.includes(k));
-
-  if (isTimeSeries && dataset.metrics.length === 1) return 'line';
-  if (isTimeSeries && dataset.metrics.length > 1) return 'line';
-
-  // 多行多指标 → 分组柱状
+  if (isTimeSeries && dataset.metrics.length >= 1) return 'line';
   if (dataset.metrics.length > 1) return 'group_bar';
-
-  // 多行单指标 → 柱状图（排行榜风格）
   return 'bar';
 }
 
 /**
- * 将后端 dashboard 事件转换为 DashboardData，并智能推荐图表类型
+ * 将后端 dashboard 事件转换为 DashboardData（V2：完整状态映射 + 解读/异常/溯源）
  */
 export function convertDashboardEvent(event: any): DashboardData {
   const cards: ChartCardConfig[] = (event.cards || []).map((c: any, i: number) => {
@@ -69,11 +57,18 @@ export function convertDashboardEvent(event: any): DashboardData {
       dataset,
       sql: c.sql,
       subId: c.sub_id,
-      status: c.status === 'error' ? 'error' : c.data ? 'success' : 'loading',
+      status: (c.status || (c.data ? 'success' : 'loading')) as ChartCardConfig['status'],
       error: c.error,
+      retryable: c.retryable,
+      facts: c.facts,
+      anomalies: c.anomalies,
+      trace: c.trace,
+      interpretation: c.interpretation,
     };
-    // 智能推荐图表类型（覆盖后端默认的 bar）
-    baseCard.chartType = recommendChartType(baseCard);
+    // 仅成功卡片做智能图表类型修正（错误/取消卡无数据）
+    if (baseCard.status === 'success' || baseCard.status === 'loading') {
+      baseCard.chartType = recommendChartType(baseCard);
+    }
     return baseCard;
   });
   return {
@@ -83,35 +78,142 @@ export function convertDashboardEvent(event: any): DashboardData {
   };
 }
 
-export const Dashboard: React.FC<DashboardProps> = ({ data, onSaveReport, onRefresh, showToolbar = true }) => {
+/** 卡片级解读 + 异常 + 溯源（per-card 信息密度） */
+function CardInsight({ card }: { card: ChartCardConfig }) {
+  if (!card.interpretation && !card.anomalies?.length && !card.trace) return null
+  const anomalies = card.anomalies ?? []
+  const trace = card.trace ?? {}
+  const tables = (trace.tables ?? []) as string[]
+  return (
+    <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {card.interpretation ? (
+        <div style={{ fontSize: 13, color: 'rgba(0,0,0,.72)', lineHeight: 1.6 }}>{card.interpretation}</div>
+      ) : null}
+      {anomalies.map((a, i) => (
+        <Alert key={i} type="warning" showIcon message={a.desc} style={{ padding: '3px 10px', fontSize: 12 }} />
+      ))}
+      {Object.keys(trace).length ? (
+        <Collapse
+          size="small" ghost
+          style={{ background: 'transparent' }}
+          items={[{
+            key: 'trace',
+            label: (
+              <Space size={6}>
+                <Tag color="cyan" style={{ marginInlineEnd: 0, fontSize: 11 }}>口径与溯源</Tag>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {tables.join('、') || '数据来源'} · 耗时 {String(trace.latency_ms ?? '-')}ms
+                </Typography.Text>
+              </Space>
+            ),
+            children: (
+              <Descriptions size="small" column={1} bordered
+                items={[
+                  { key: 'tables', label: '数据源表', children: tables.join('、') || '—' },
+                  { key: 'sql', label: 'SQL', children: <span style={{ fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all' }}>{String(trace.sql ?? '—')}</span> },
+                  { key: 'rows', label: '行数', children: String(trace.row_count ?? '—') },
+                  { key: 'latency', label: '耗时', children: `${String(trace.latency_ms ?? '-')} ms` },
+                ]}
+              />
+            ),
+          }]}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+export const Dashboard: React.FC<DashboardProps> = ({
+  data, onSaveReport, onRefresh, showToolbar = true, onRetryCard, retryDisabled,
+}) => {
   const layout = data.layout?.length ? data.layout : recommendLayout(data.cards);
 
-  // 分离 KPI 卡片和图表卡片
   const kpiCards = data.cards.filter((c) => c.chartType === 'kpi' || c.chartType === 'kpi_group');
   const chartCards = data.cards.filter((c) => c.chartType !== 'kpi' && c.chartType !== 'kpi_group');
 
-  const renderCard = (card: ChartCardConfig, i: number) => {
-    const span = layout[i]?.span || 12;
-    if (card.chartType === 'kpi') {
+  /** 非成功卡片的统一占位块（loading / error / cancelled） */
+  const renderStateCard = (card: ChartCardConfig) => {
+    const status = card.status ?? 'loading'
+    if (status === 'error') {
       return (
-        <Col key={card.id} span={span} xs={24} sm={12} md={span}>
-          <KpiCard title={card.title} dataset={card.dataset} />
+        <Col key={card.id} span={24}>
+          <div style={{
+            border: '1px solid #FDECEC', background: '#FFFBFB', borderRadius: 12, padding: '14px 18px',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 4 }}>{card.title}</div>
+                <Alert type="error" showIcon message={card.error || '执行失败'} style={{ fontSize: 12 }} />
+              </div>
+              {onRetryCard && card.subId && card.retryable !== false ? (
+                <Button
+                  size="small" icon={<RetweetOutlined />}
+                  disabled={retryDisabled?.(card.subId)}
+                  onClick={() => onRetryCard(card.subId!)}
+                >
+                  重试
+                </Button>
+              ) : null}
+            </div>
+          </div>
         </Col>
-      );
+      )
     }
+    if (status === 'cancelled') {
+      return (
+        <Col key={card.id} span={24}>
+          <div style={{
+            border: '1px dashed #E5E7EB', background: '#FAFAFA', borderRadius: 12, padding: '14px 18px',
+            color: '#9CA3AF',
+          }}>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>{card.title}</div>
+            <div style={{ fontSize: 12, marginTop: 2 }}>已取消</div>
+          </div>
+        </Col>
+      )
+    }
+    // pending / generating / executing / loading
+    return (
+      <Col key={card.id} span={24}>
+        <div style={{
+          border: '1px solid #EDEAFD', background: '#FAFAFE', borderRadius: 12, padding: '16px 18px',
+          display: 'flex', alignItems: 'center', gap: 12,
+        }}>
+          <Spin size="small" />
+          <div>
+            <div style={{ fontSize: 13.5, fontWeight: 600 }}>{card.title || '子查询'}</div>
+            <div style={{ fontSize: 12, color: '#8c8c8c' }}>
+              {status === 'generating' ? '正在生成 SQL…' : status === 'executing' ? '正在执行…' : '等待执行…'}
+            </div>
+          </div>
+        </div>
+      </Col>
+    )
+  }
+
+  const renderCard = (card: ChartCardConfig) => {
+    if (card.status && card.status !== 'success' && card.status !== 'loading') {
+      return renderStateCard(card)
+    }
+    // kpi_group 本身就是大卡片，占整行
     if (card.chartType === 'kpi_group') {
       return (
         <Col key={card.id} span={24}>
           <KpiGroupCard title={card.title} dataset={card.dataset} />
+          <CardInsight card={card} />
         </Col>
       );
     }
     return (
-      <Col key={card.id} span={span} xs={24} sm={24} md={span}>
+      <Col key={card.id} span={24}>
         <ChartCard config={card} height={320} />
+        <CardInsight card={card} />
       </Col>
     );
   };
+
+  const singleKpis = kpiCards.filter((c) => c.chartType === 'kpi');
+  const kpiGroupCards = kpiCards.filter((c) => c.chartType === 'kpi_group');
 
   return (
     <div style={{ width: '100%' }}>
@@ -122,7 +224,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ data, onSaveReport, onRefr
           background: '#f7f8fa', borderRadius: 10,
         }}>
           <span style={{ fontSize: 13, color: '#595959', fontWeight: 500 }}>
-            分析结果 · 共 {data.cards.length} 个维度
+            分析结果 · 共 {data.cards.length} 个子查询
           </span>
           <Space size={8}>
             {onRefresh && (
@@ -139,17 +241,53 @@ export const Dashboard: React.FC<DashboardProps> = ({ data, onSaveReport, onRefr
         </div>
       )}
 
-      {/* KPI 卡片区域（顶部） */}
-      {kpiCards.length > 0 && (
+      {/* KPI 指标区域：单个 KPI 合并为一个大卡片 */}
+      {singleKpis.length > 0 && (
+        <div style={{
+          background: '#fff',
+          borderRadius: 12,
+          padding: '20px 24px',
+          boxShadow: '0 1px 2px rgba(15,35,34,.04), 0 6px 16px -4px rgba(15,35,34,.06), 0 20px 40px -16px rgba(15,35,34,.10)',
+          border: '1px solid rgba(30,35,60,.08)',
+          marginBottom: (kpiGroupCards.length > 0 || chartCards.length > 0) ? 16 : 0,
+        }}>
+          <div style={{ fontSize: 14, color: '#262626', fontWeight: 600, marginBottom: 16 }}>核心指标</div>
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: `repeat(${Math.min(singleKpis.length, 4)}, 1fr)`,
+            gap: 20,
+          }}>
+            {singleKpis.map((card, i) => {
+              const metric = card.dataset.metrics[0];
+              const value = card.dataset.rows[0]?.[metric];
+              const color = KPI_COLORS[i % KPI_COLORS.length];
+              return (
+                <div key={card.id} style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+                  <div style={{ width: 4, height: 36, background: color, borderRadius: 2, flexShrink: 0 }} />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 12, color: '#8c8c8c', marginBottom: 4, lineHeight: 1.4 }}>{card.title}</div>
+                    <div style={{ fontSize: 24, fontWeight: 700, color: '#1f1f1f', lineHeight: 1, letterSpacing: '-0.5px' }}>
+                      {value !== undefined && value !== null ? formatNumber(value) : '-'}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* KPI 组卡片 */}
+      {kpiGroupCards.length > 0 && (
         <Row gutter={[16, 16]} style={{ marginBottom: chartCards.length > 0 ? 16 : 0 }}>
-          {kpiCards.map((card, i) => renderCard(card, i))}
+          {kpiGroupCards.map((card) => renderCard(card))}
         </Row>
       )}
 
-      {/* 图表卡片区域（下方） */}
+      {/* 图表卡片区域 */}
       {chartCards.length > 0 && (
         <Row gutter={[16, 16]}>
-          {chartCards.map((card, i) => renderCard(card, kpiCards.length + i))}
+          {chartCards.map((card) => renderCard(card))}
         </Row>
       )}
     </div>

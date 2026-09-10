@@ -8,10 +8,12 @@ import {
   HistoryOutlined, PlusOutlined, ArrowUpOutlined, DownOutlined,
 } from '@ant-design/icons'
 import { client, errMsg } from '../api/client'
-import { postChatStream } from '../api/sse'
+import { postChatStream, postMultiStream } from '../api/sse'
 import { useChatStore } from '../stores/chat'
+import { useMultiQueryStore } from '../stores/multiQuery'
 import MessageCard from '../components/MessageCard'
 import type { ChatMsg, Conversation, Datasource } from '../types'
+import type { DashboardEventV2, SubQuerySpec } from '../types/chart'
 import { GlassSelect } from '../ui'
 import { useMessageApi } from '../hooks/useMessageApi'
 
@@ -44,6 +46,14 @@ export default function ChatPage() {
     setConversations, setCurrentConvId, setMessages, appendUser, appendStreamMsg, setStreaming, setStage,
   } = useChatStore()
   const bottomRef = useRef<HTMLDivElement>(null)
+
+  // 公共：合并更新最后一条 assistant 消息（SSE 事件分片写入 / 多查询 confirm/retry 共用）
+  const updateLastAssistant = (patch: Partial<ChatMsg>) => {
+    const idx = useChatStore.getState().messages.length - 1
+    useChatStore.getState().patchMessage(idx, patch)
+  }
+  // 短别名：各 SSE 回调中统一用 update(...)
+  const update = updateLastAssistant
 
   // ========== 文件问答 ==========
   interface DocFile {
@@ -250,13 +260,11 @@ export default function ChatPage() {
     setStreaming(true)
     setStage('准备中…')
     setSteps([])
+    useMultiQueryStore.getState().reset()   // 新问题：重置多查询状态机
     const partial: ChatMsg = { role: 'assistant', content_type: 'progress', content: { msg: '' } }
     appendStreamMsg(partial)
     // 公共方法：合并更新最后一条 assistant 消息（content 深度合并，供 SSE 各事件分片写入）
-    const update = (patch: Partial<ChatMsg>) => {
-      const idx = useChatStore.getState().messages.length - 1
-      useChatStore.getState().patchMessage(idx, patch)
-    }
+    const update = updateLastAssistant
     // 公共方法：向最后一条消息的 content[key] 追加增量文本（打字机/思考流/回答流）
     const appendDelta = (key: string, delta: string) => {
       const idx = useChatStore.getState().messages.length - 1
@@ -333,21 +341,62 @@ export default function ChatPage() {
           onError: (p) => {
             update({ content_type: 'error', content: { msg: p.msg } as never })
           },
-          // 多查询（C11）
+          // 多查询（C11 V2：两阶段协同编排）
           onMultiSpec: (p) => {
-            update({ content_type: 'result', content: { multi_spec: p } as never })
+            const spec = p as {
+              task_id?: string
+              original_question: string
+              sub_queries: SubQuerySpec[]
+              layout_hint?: string
+            }
+            // 初始化拆解预览（store 驱动 Phase A 面板）
+            useMultiQueryStore.getState().initPreview({
+              task_id: spec.task_id,
+              original_question: spec.original_question,
+              sub_queries: spec.sub_queries ?? [],
+              layout_hint: spec.layout_hint,
+            })
+            update({ content_type: 'result', content: { multi_spec: p, mode: 'multi_preview' } as never })
+          },
+          onMultiTask: (p) => {
+            useMultiQueryStore.getState().setTaskId(p.task_id)
+          },
+          onMultiRejected: (p) => {
+            update({ content_type: 'error', content: { msg: p.msg } as never })
+            useMultiQueryStore.getState().resetPreview()
+          },
+          onSubProgress: (p) => {
+            useMultiQueryStore.getState().progress(p.sub_id, p.stage, p.msg)
           },
           onSubSql: (p) => {
-            update({ content_type: 'result', content: { sub_sql: p } as never })
+            useMultiQueryStore.getState().subSql(String(p.sub_id), String(p.sql ?? ''))
           },
           onSubResult: (p) => {
-            update({ content_type: 'result', content: { sub_result: p } as never })
+            useMultiQueryStore.getState().subResult(p as never)
           },
           onSubError: (p) => {
-            update({ content_type: 'result', content: { sub_error: p } as never })
+            useMultiQueryStore.getState().subError(
+              String(p.sub_id), String(p.error ?? '执行失败'), p.retryable !== false)
           },
           onDashboard: (p) => {
-            update({ content_type: 'result', content: { dashboard: p, mode: 'dashboard' } as never })
+            const payload = p as unknown as DashboardEventV2
+            // 重试子流：dashboard 只含该卡最新状态，与历史 dashboard 合并
+            const multiState = useMultiQueryStore.getState()
+            if (payload.retry_sub_id) {
+              const idx = useChatStore.getState().messages.length - 1
+              const prevContent = (useChatStore.getState().messages[idx]?.content ?? {}) as Record<string, unknown>
+              const prevDashboard = (prevContent.dashboard ?? {}) as Record<string, unknown>
+              update({
+                content_type: 'result',
+                content: { dashboard: { ...prevDashboard, ...p }, mode: 'dashboard' } as never,
+              })
+            } else {
+              update({ content_type: 'result', content: { dashboard: p, mode: 'dashboard' } as never })
+            }
+            multiState.markDashboard(payload.message_id ?? null)
+          },
+          onMultiError: (p) => {
+            update({ content_type: 'error', content: { msg: p.msg } as never })
           },
           // AI 解读
           onAiInterpretationStart: (p) => {
@@ -377,6 +426,149 @@ export default function ChatPage() {
       setStreaming(false)
       setStage('')
     }
+  }
+
+  // ========== 多查询 V2：两阶段协同编排（confirm / regen / retry / cancel）==========
+  /** 确认执行：Phase A 预览确认 → Phase B 并行执行（SSE 实时跟踪） */
+  const handleMultiConfirm = async (subs: SubQuerySpec[]) => {
+    const state = useMultiQueryStore.getState()
+    const taskId = state.taskId
+    const originQuestion = state.originQuestion
+    useMultiQueryStore.setState({ confirmLoading: true })
+    state.startExecuting(subs)
+    setStreaming(true)
+    try {
+      await postMultiStream('/api/v1/chat/multi/confirm', {
+        conversation_id: currentConvId,
+        question: originQuestion || useChatStore.getState().messages.find((m) => m.role === 'user')?.content?.text || '',
+        datasource_id: dsId,
+        workspace_id: 0,
+        model_id: modelId ?? undefined,
+        task_id: taskId,
+        sub_queries: subs,
+      }, {
+        onMultiTask: (p) => useMultiQueryStore.getState().setTaskId(p.task_id),
+        onSubProgress: (p) => useMultiQueryStore.getState().progress(p.sub_id, p.stage, p.msg),
+        onSubSql: (p) => useMultiQueryStore.getState().subSql(String(p.sub_id), String(p.sql ?? '')),
+        onSubResult: (p) => useMultiQueryStore.getState().subResult(p as never),
+        onSubError: (p) => useMultiQueryStore.getState().subError(
+          String(p.sub_id), String(p.error ?? '执行失败'), p.retryable !== false),
+        onDashboard: (p) => {
+          const payload = p as unknown as DashboardEventV2
+          update({ content_type: 'result', content: { dashboard: p, mode: 'dashboard' } as never })
+          useMultiQueryStore.getState().markDashboard(payload.message_id ?? null)
+        },
+        onMultiError: (p) => update({ content_type: 'error', content: { msg: p.msg } as never }),
+        onError: (p) => update({ content_type: 'error', content: { msg: p.msg } as never }),
+        onDone: () => {
+          setStreaming(false)
+          setStage('')
+          useMultiQueryStore.setState({ confirmLoading: false })
+          loadConversations()
+        },
+      })
+    } catch (e) {
+      update({ content_type: 'error', content: { msg: errMsg(e) } as never })
+      setStreaming(false)
+      useMultiQueryStore.setState({ confirmLoading: false })
+    }
+  }
+
+  /** 重新拆解：用户对拆解结果不满意（反馈重拆） */
+  const handleRegen = async () => {
+    const state = useMultiQueryStore.getState()
+    const originQuestion = state.originQuestion || String(useChatStore.getState().messages.find((m) => m.role === 'user')?.content?.text ?? '')
+    if (!originQuestion) return
+    useMultiQueryStore.setState({ confirmLoading: true })
+    try {
+      const r = await client.post('/chat/multi/regen', {
+        question: originQuestion, datasource_id: dsId, workspace_id: 0,
+        feedback: '', sub_queries: state.preview,
+      })
+      const data = r.data as { task_id?: string; sub_queries: SubQuerySpec[]; layout_hint?: string }
+      useMultiQueryStore.getState().setPreview(data.sub_queries ?? [], data.layout_hint ?? 'auto', data.task_id)
+      update({ content_type: 'result', content: {
+        multi_spec: {
+          task_id: data.task_id, original_question: originQuestion,
+          sub_queries: data.sub_queries ?? [], layout_hint: data.layout_hint ?? 'auto',
+        }, mode: 'multi_preview',
+      } as never })
+    } catch (e) {
+      msgApi.warning(errMsg(e))
+    } finally {
+      useMultiQueryStore.setState({ confirmLoading: false })
+    }
+  }
+
+  /** 单卡重试：失败卡片重新执行（SSE 子流，事件按同一 sub_id 累积） */
+  const retryLockRef = useRef<Record<string, number>>({})
+  const handleRetryCard = async (subId: string) => {
+    const state = useMultiQueryStore.getState()
+    const messageId = state.messageId
+    if (!messageId) {
+      msgApi.warning('缺少消息标识，无法重试')
+      return
+    }
+    // 防抖：同一卡片 3s 内禁止连点
+    const now = Date.now()
+    if (retryLockRef.current[subId] && now - retryLockRef.current[subId] < 3000) return
+    retryLockRef.current[subId] = now
+    state.retryCard(subId)
+    setStreaming(true)
+    try {
+      await postMultiStream(`/api/v1/chat/multi/${messageId}/sub/${subId}/retry`, {
+        conversation_id: currentConvId, workspace_id: 0, model_id: modelId ?? undefined,
+        datasource_id: dsId,
+      }, {
+        onSubProgress: (p) => useMultiQueryStore.getState().progress(p.sub_id, p.stage, p.msg),
+        onSubSql: (p) => useMultiQueryStore.getState().subSql(String(p.sub_id), String(p.sql ?? '')),
+        onSubResult: (p) => useMultiQueryStore.getState().subResult(p as never),
+        onSubError: (p) => useMultiQueryStore.getState().subError(
+          String(p.sub_id), String(p.error ?? '执行失败'), p.retryable !== false),
+        onDashboard: (p) => {
+          const payload = p as unknown as DashboardEventV2
+          // 与历史 dashboard 合并（retry 子流仅更新该卡，保留 overview 等字段）
+          const idx = useChatStore.getState().messages.length - 1
+          const prevContent = (useChatStore.getState().messages[idx]?.content ?? {}) as Record<string, unknown>
+          const prevDashboard = (prevContent.dashboard ?? {}) as Record<string, unknown>
+          update({
+            content_type: 'result',
+            content: { dashboard: { ...prevDashboard, ...p }, mode: 'dashboard' } as never,
+          })
+          useMultiQueryStore.getState().markDashboard(payload.message_id ?? null)
+        },
+        onError: (p) => {
+          // 重试失败：卡片恢复 error 态（store 内已回退），消息不覆盖
+          useMultiQueryStore.getState().subError(subId, p.msg ?? '重试失败', true)
+        },
+        onDone: () => {
+          setStreaming(false)
+          setStage('')
+          loadConversations()
+        },
+      })
+    } catch (e) {
+      useMultiQueryStore.getState().subError(subId, errMsg(e), true)
+      setStreaming(false)
+    }
+  }
+
+  const retryDisabled = (subId: string) => {
+    const last = retryLockRef.current[subId]
+    return !!last && Date.now() - last < 3000
+  }
+
+  /** 整体取消：未完成子查询置 cancelled，已完成卡片保留 */
+  const handleCancelMulti = async () => {
+    const state = useMultiQueryStore.getState()
+    if (!state.taskId) {
+      useMultiQueryStore.getState().markCancelled()
+      return
+    }
+    try {
+      await client.post(`/chat/multi/${state.taskId}/cancel`, {})
+    } catch { /* 忽略 */ }
+    useMultiQueryStore.getState().markCancelled()
   }
 
   const saveQuery = (msg: ChatMsg) => {
@@ -740,6 +932,10 @@ export default function ChatPage() {
                   onClarifyConfirm={(tables) => {
                     send(`已确认查询表：${tables.join('、')}`)
                   }}
+                  onMultiConfirm={handleMultiConfirm}
+                  onRetryCard={handleRetryCard}
+                  onCancelMulti={handleCancelMulti}
+                  retryDisabled={retryDisabled}
                 />
               ))}
               <div ref={bottomRef} style={{ height: 4 }} />

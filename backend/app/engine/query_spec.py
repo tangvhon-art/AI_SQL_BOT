@@ -378,6 +378,8 @@ class SubQuerySpec(BaseModel):
     table_hints: list[str] = Field(default_factory=list)
     chart_hint: str | None = None          # 推荐图表类型（推荐器填充）
     title: str | None = None               # 卡片标题（LLM 生成）
+    confidence: float = 0.5                # 要素提取置信度（低置信度前端高亮提示）
+    enabled: bool = True                   # 用户确认时是否启用（停用项不执行）
 
     def to_query_spec(self) -> QuerySpec:
         """转换为旧版 QuerySpec，传入 generate_sql_stream。"""
@@ -394,6 +396,10 @@ class SubQuerySpec(BaseModel):
             table_hints=self.table_hints,
         )
 
+    def to_dict(self) -> dict:
+        """JSON 序列化（落库 / 单卡重试定位 / dashboard 组装用）。"""
+        return self.model_dump(mode="json")
+
 
 class MultiQuerySpec(BaseModel):
     """多查询拆解结果：原始问题 + 子查询列表 + 布局提示。"""
@@ -402,10 +408,15 @@ class MultiQuerySpec(BaseModel):
     layout_hint: str = "auto"             # auto/grid_2/grid_3/tabs/masonry
     shared_dimension: str | None = None    # 共享维度（联动用）
     source: str = "rule"                   # rule/llm/manual
+    task_id: str = ""                      # 两阶段编排任务标识（multi_spec 下发，confirm 幂等用）
 
     def is_single(self) -> bool:
         """是否单查询（长度=1 时走旧链路兼容）。"""
         return len(self.sub_queries) <= 1
+
+    def enabled_queries(self) -> list[SubQuerySpec]:
+        """用户确认后启用的子查询列表。"""
+        return [s for s in self.sub_queries if s.enabled]
 
     def to_dict(self) -> dict:
         return self.model_dump(mode="json")

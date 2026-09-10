@@ -82,6 +82,15 @@ class Settings(BaseSettings):
     # C11 多候选
     multi_candidate_enabled: bool = True
 
+    # ===== 多查询 V2.0（两阶段协同编排）=====
+    multi_max_concurrent: int = 4           # 子查询并发上限（同时受 rate_limit 约束）
+    multi_max_subqueries: int = 5           # 拆解子查询数量上限（超限合并或提示）
+    multi_sub_timeout_s: float = 60.0       # 单子查询总超时（生成+执行+修正）
+    multi_sub_gen_retry: int = 1            # SQL 生成失败重试次数
+    multi_sub_exec_retry: int = 1           # 执行失败 LLM 自动修正次数
+    multi_confirm_timeout_s: float = 60.0   # Phase A 等待用户确认超时（超时按原始清单自动执行）
+    multi_budget_llm_calls: int = 0         # 单次多查询 LLM 调用预算上限（0=不限）
+
     @property
     def sqlalchemy_url(self) -> str:
         if self.database_url:

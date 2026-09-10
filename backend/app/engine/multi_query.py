@@ -1,12 +1,16 @@
 """多查询拆解与并行执行（C11 公共层）。
 
 MultiQueryDecomposer：策略模式 + 责任链，规则拆解优先，LLM 兜底。
-ParallelExecutor：泛型并行执行模板，统一管理并发度、超时、容错、进度回调。
+ParallelExecutor：泛型并行执行模板（V1.0 遗留，多查询 V2.0 改用 MultiQueryOrchestrator）。
+MultiQueryOrchestrator：多查询执行编排器（asyncio + 信号量），并行调度 N 个子查询，
+统一并发上限 / 超时 / 容错 / 取消 / 进度回调。
 """
 from __future__ import annotations
 
 import asyncio
 import re
+import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
@@ -15,6 +19,10 @@ import logging
 from .query_spec import MultiQuerySpec, SubQuerySpec
 
 logger = logging.getLogger(__name__)
+
+
+def _new_task_id() -> str:
+    return uuid.uuid4().hex[:12]
 
 
 # ---------- 拆解规则接口 ----------
@@ -207,8 +215,13 @@ class MultiQueryDecomposer:
         cls._rules.sort(key=lambda r: getattr(r, "_priority", 0), reverse=True)
 
     def decompose(self, question: str, workspace_id: int = 0,
-                  datasource_id: int = 0) -> MultiQuerySpec:
-        """拆解入口：规则链 → LLM 兜底 → 组装 MultiQuerySpec。"""
+                  datasource_id: int = 0, parent_spec: Any | None = None,
+                  task_id: str = "") -> MultiQuerySpec:
+        """拆解入口：规则链 → LLM 兜底 → 要素补齐 → 组装 MultiQuerySpec。
+
+        parent_spec：父级 QuerySpec（时间/表提示等上下文继承给子查询）；
+        task_id：两阶段编排任务标识（multi_spec 事件下发，confirm 幂等用）。
+        """
         logger.info("[多查询拆解] 原始问题: %s", question[:120])
 
         # 1. 规则链
@@ -265,14 +278,17 @@ class MultiQueryDecomposer:
         if not sub_questions:
             sub_questions = [question]
 
-        # 4. 组装 SubQuerySpec
-        sub_specs = []
-        for i, q in enumerate(sub_questions):
-            sub_specs.append(SubQuerySpec(
-                sub_id=f"q{i+1}",
-                question=q.strip(),
-                intent="value",
-            ))
+        # 4. 组装 SubQuerySpec（要素补齐：LLM 批量提取 + 规则校验 + 父级上下文继承）
+        from .sub_spec import enrich_sub_specs
+        sub_questions = [q.strip() for q in sub_questions if q.strip()]
+        sub_specs = enrich_sub_specs(
+            question=question,
+            sub_questions=sub_questions,
+            parent_spec=parent_spec,
+            llm=self.llm,
+            parent_hints=getattr(parent_spec, "table_hints", None) if parent_spec else None,
+            schema_name=(getattr(parent_spec, "schema_name", "") or "") if parent_spec else "",
+        )
 
         logger.info("[多查询拆解] 最终: source=%s hit_rule=%s sub_count=%d subs=%s",
                     source, hit_rule, len(sub_specs),
@@ -283,6 +299,7 @@ class MultiQueryDecomposer:
             sub_queries=sub_specs,
             layout_hint="auto",
             source=source,
+            task_id=task_id or _new_task_id(),
         )
 
     def _llm_decompose(self, question: str) -> list[str] | None:
@@ -392,4 +409,92 @@ class ParallelExecutor:
 
         await asyncio.gather(*[run_one(sid, fn) for sid, fn in tasks])
         thread_pool.shutdown(wait=False)
+        return results
+
+
+# ---------- 多查询 V2.0 执行编排器 ----------
+class MultiQueryOrchestrator:
+    """多查询执行编排器：并行调度 N 个子查询流水线。
+
+    对比 V1.0 ParallelExecutor 的差异：
+    - 真并行：asyncio.gather + Semaphore 并发调度（子任务在独立事件循环线程内执行）
+    - 统一超时：单子查询超时 multi_sub_timeout_s，超时置 error 不阻塞其余
+    - 整体取消：cancel() 置标志，未完成任务置 cancelled，已完成卡片保留
+    - 进度回调：on_event(event, data) 供 SSE 实时推送
+
+    用法：
+        orch = MultiQueryOrchestrator(max_concurrent=4, sub_timeout_s=60.0)
+        results = orch.run(sub_queries, ctx)   # ctx: 见 sub_task.SubTaskContext
+        orch.cancel()                          # 任意时刻调用
+    """
+
+    def __init__(self, max_concurrent: int = 4, sub_timeout_s: float = 60.0):
+        self.max_concurrent = max_concurrent
+        self.sub_timeout_s = sub_timeout_s
+        self._cancelled = False
+        self._lock = threading.Lock()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    def cancel(self) -> None:
+        """请求整体取消：未完成任务置 cancelled，已完成卡片保留。"""
+        with self._lock:
+            self._cancelled = True
+
+    def run(self, sub_queries: list[SubQuerySpec], ctx: Any) -> dict[str, Any]:
+        """并行执行子查询列表。返回 {sub_id: SubTaskResult}。
+
+        ctx 需提供：emit(event, data)、run_subtask_pipeline 所需全部字段。
+        同步阻塞直到全部子查询结束（含取消）。
+        """
+        from .sub_task import run_subtask_pipeline, SubTaskResult
+
+        results: dict[str, Any] = {}
+        if not sub_queries:
+            return results
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            results = loop.run_until_complete(
+                self._run_async(sub_queries, ctx, run_subtask_pipeline, SubTaskResult))
+        finally:
+            loop.close()
+        return results
+
+    async def _run_async(self, sub_queries, ctx, runner, result_cls) -> dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        sem = asyncio.Semaphore(self.max_concurrent)
+        results: dict[str, Any] = {}
+
+        async def run_one(sub: SubQuerySpec) -> None:
+            async with sem:
+                if self.cancelled:
+                    ctx.emit("sub_error", {"sub_id": sub.sub_id,
+                                           "error": "已取消", "retryable": False,
+                                           "stage": "cancelled"})
+                    return
+                try:
+                    result = await asyncio.wait_for(
+                        loop.run_in_executor(None, runner, sub, ctx),
+                        timeout=self.sub_timeout_s)
+                    results[sub.sub_id] = result
+                except asyncio.TimeoutError:
+                    exc = TimeoutError(f"子查询 {sub.sub_id} 执行超时（{self.sub_timeout_s}s）")
+                    results[sub.sub_id] = exc
+                    ctx.emit("sub_error", {"sub_id": sub.sub_id, "error": str(exc),
+                                           "retryable": True, "stage": "timeout"})
+                except Exception as exc:  # noqa: BLE001
+                    results[sub.sub_id] = exc
+                    ctx.emit("sub_error", {"sub_id": sub.sub_id, "error": str(exc),
+                                           "retryable": True, "stage": "pipeline"})
+
+        await asyncio.gather(*[run_one(s) for s in sub_queries])
+
+        # 取消兜底：未完成（超时中断/排队中被取消）的子查询补齐 cancelled 结果
+        for s in sub_queries:
+            if s.sub_id not in results:
+                results[s.sub_id] = result_cls(s.sub_id, status="cancelled")
         return results
