@@ -19,6 +19,7 @@ export default function SchemaPage() {
   const [rels, setRels] = useState<Relationship[]>([])
   const [relOpen, setRelOpen] = useState(false)
   const [kw, setKw] = useState('')
+  const [relKw, setRelKw] = useState('')
   const [form] = Form.useForm()
 
   const loadAll = async () => {
@@ -193,12 +194,28 @@ export default function SchemaPage() {
             label: '表关系',
             children: (
               <div>
-                <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setRelOpen(true) }} style={{ marginBottom: 12 }}>
-                  手动添加关联
-                </Button>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 12 }}>
+                  <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setRelOpen(true) }}>
+                    手动添加关联
+                  </Button>
+                  <Input.Search
+                    placeholder="搜索源表/字段 或 目标表/字段"
+                    value={relKw}
+                    onChange={(e) => setRelKw(e.target.value)}
+                    onClear={() => setRelKw('')}
+                    allowClear
+                    style={{ width: 280 }}
+                    prefix={<SearchOutlined style={{ color: 'rgba(0,0,0,.35)' }} />}
+                  />
+                </div>
                 <Table
                   rowKey="id"
-                  dataSource={rels}
+                  dataSource={rels.filter((r) => {
+                    const kw = relKw.trim().toLowerCase()
+                    if (!kw) return true
+                    return [r.src_table, r.src_col, r.dst_table, r.dst_col]
+                      .some((v) => String(v ?? '').toLowerCase().includes(kw))
+                  })}
                   pagination={false}
                   columns={[
                     { title: '源表.字段', render: (_, r) => <code>{r.src_table}.{r.src_col}</code> },

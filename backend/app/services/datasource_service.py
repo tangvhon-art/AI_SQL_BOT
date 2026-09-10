@@ -311,6 +311,13 @@ def sync_schema(ds: Datasource) -> dict:
                 # 用 (src_table_id, src_col_id, dst_table_id) 做旧关系索引，推断时恢复
                 old_inferred_index = {(r.src_table_id, r.src_col_id, r.dst_table_id): r
                                        for r in old_inferred}
+                # 已手动删除的推断关系：下次采集时过滤，不恢复、不新建、不更新
+                deleted_inferred = (db.query(Relationship).execution_options(include_deleted=True)
+                                    .filter(Relationship.datasource_id == ds.id,
+                                            Relationship.source == "inferred",
+                                            Relationship.is_deleted == True).all())
+                deleted_keys = {(r.src_table_id, r.src_col_id, r.dst_table_id)
+                                for r in deleted_inferred}
                 # 常见非外键字段前缀（这些字段通常不是表关联外键）
                 _NON_FK_PREFIXES = frozenset({
                     "guid", "uid", "uuid", "open", "union", "app", "calendar",
@@ -401,6 +408,9 @@ def sync_schema(ds: Datasource) -> dict:
                         # 避免与物理外键重复
                         fk_key = (src_tm.id, col.id, dst_tm.id, dst_id_col.id)
                         if fk_key in existing_fk:
+                            continue
+                        # 跳过用户手动删除的推断关系（不恢复、不新建、不更新）
+                        if (src_tm.id, col.id, dst_tm.id) in deleted_keys:
                             continue
                         # 恢复旧推断关系或新建
                         old_rel = old_inferred_index.get((src_tm.id, col.id, dst_tm.id))

@@ -52,6 +52,25 @@ def _extract_time(question: str, parent_time: TimeSpec | None) -> TimeSpec | Non
     return None
 
 
+def _fallback_title(question: str) -> str:
+    """LLM 未返回标题时的规则化回退：去除查询动词和填充词，截取核心短语。"""
+    t = question.strip()
+    # 去除句首查询动词
+    for prefix in ("查询", "统计", "查看", "展示", "获取", "列出", "计算", "分析", "求"):
+        if t.startswith(prefix):
+            t = t[len(prefix):]
+            break
+    # 去除尾部填充词
+    for suffix in ("分别是", "是哪个", "是多少", "有哪些", "的记录", "情况", "数据", "信息"):
+        if t.endswith(suffix):
+            t = t[: -len(suffix)]
+    # 去除中间冗余词
+    for word in ("分别", "各个", "每个", "所有", "全部", "的"):
+        t = t.replace(word, "")
+    t = t.strip("，。、；： ")
+    return t[:16] if t else question[:16]
+
+
 def _rule_intent(question: str) -> str:
     """规则兜底意图：按关键词命中返回首个意图，未命中返回 value。"""
     for intent, words in _INTENT_KEYWORDS:
@@ -203,7 +222,7 @@ def enrich_sub_specs(
 
         time = _extract_time(sq, parent_time)
 
-        title = str(item.get("title") or "").strip() or sq[:30]
+        title = str(item.get("title") or "").strip() or _fallback_title(sq)
 
         specs.append(SubQuerySpec(
             sub_id=sub_id,
@@ -234,7 +253,16 @@ def _llm_extract(question: str, sub_questions: list[str], llm: Any) -> list[dict
             "【输出要求】严格返回 JSON 数组，每个元素对应一个子查询：\n"
             '[{"intent": "value|compare|ranking|trend|detail|statistic", '
             '"metrics": ["指标名"], "dimensions": ["维度名"], '
-            '"title": "卡片标题（10字内）", "chart_hint": "kpi|bar|line|group_bar|rank|pie|combo"}]\n'
+            '"title": "卡片标题", "chart_hint": "kpi|bar|line|group_bar|rank|pie|combo"}]\n'
+            "【标题生成规则】\n"
+            "1. title 是图表卡片的展示标题，必须由你生成，禁止留空，禁止直接复制子查询原文\n"
+            "2. 标题应简洁概括该图表的核心内容（6-14字），包含关键时间范围（如近7日/本月）和核心指标\n"
+            "3. 去掉查询/统计/哪个/的记录/分别是等无意义填充词，去掉重复的业务对象名（多个子查询同一对象时省略）\n"
+            "4. 标题应体现洞察角度而非查询动作：趋势类用「XX趋势/每日XX」，排行类用「XX排行/XX最多」，"
+            "占比类用「XX占比/XX前三占比」，对比类用「XX对比」\n"
+            "5. 示例：子查询「查询近7日的审批流程每日发起量」→ title「近7日每日发起量」；"
+            "子查询「流程近7天发起占比最多的流程是哪个流程」→ title「近7日发起最多的流程」；"
+            "子查询「用饼图统计各审批流程发起量前三的占比记录」→ title「近7日流程数量前三占比」\n"
             "【规则】\n"
             "1. 时间范围等公共条件不写入 metrics/dimensions\n"
             "2. metrics 指数值类统计口径（销售额/数量/占比等），dimensions 指分组分类口径（区域/门店/日期等）\n"
