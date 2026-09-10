@@ -1528,6 +1528,9 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
                                          "（项目/时间/状态等过滤条件、分组维度、计数/聚合形态都不得删减或改变）。"
                                          "修正后用 ```sql 代码块重新输出完整的 SELECT SQL；SQL 只能使用【可用表与字段】中列出的确切表名和字段名。"})
 
+    # LLM 已配置但连续生成失败：抛错误，不返回与问题无关的降级假数据
+    if llm is not None:
+        raise LLMError(f"SQL 生成连续失败：{last_error}")
     mock = _mock_sql(datasource_id, question, dialect)
     if mock.get("intent") == "query":
         mock["explain"] = (f"[降级模式] LLM 生成失败（{last_error[:80]}），"
@@ -1964,6 +1967,9 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
                                          "（项目/时间/状态等过滤条件、分组维度、计数/聚合形态都不得删减或改变）。"
                                          "修正后用 ```sql 代码块重新输出完整的 SELECT SQL；SQL 只能使用【可用表与字段】中列出的确切表名和字段名。"})
 
+    # LLM 已配置但连续生成失败：抛错误，不返回与问题无关的降级假数据
+    if llm is not None:
+        raise LLMError(f"SQL 生成连续失败：{last_error}")
     mock = _mock_sql(datasource_id, question, dialect)
     if mock.get("intent") == "query":
         mock["explain"] = (f"[降级模式] LLM 生成失败（{last_error[:80]}），"

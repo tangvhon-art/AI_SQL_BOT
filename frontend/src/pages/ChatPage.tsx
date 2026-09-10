@@ -877,12 +877,10 @@ export default function ChatPage() {
           </div>
           {streaming ? (
             <Button
-              type="primary"
               shape="circle"
               icon={<StopOutlined />}
               onClick={handleStop}
-              danger
-              style={{ width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+              style={{ width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: '#ff4d4f', borderColor: '#ff4d4f', color: '#fff' }}
             />
           ) : (
             <Button
