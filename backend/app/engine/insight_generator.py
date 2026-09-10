@@ -264,10 +264,13 @@ class InsightGenerator:
             interpretation = result.to_dict()
             interpretation_text = result.raw_text or result.summary
 
-        # 3. 保存报告
+        # 3. AI 生成报告标题：洞察报告-{主题}相关报告-{YYYYMMDD}
+        report_title = self._generate_report_title(config.purpose)
+
+        # 4. 保存报告
         report = Report(
             workspace_id=self.workspace_id,
-            title=f"洞察报告：{config.purpose[:30]}",
+            title=report_title,
             original_question=config.purpose,
             multi_query_spec={},
             dashboard_data=dashboard_data,
@@ -278,7 +281,7 @@ class InsightGenerator:
         self.db.add(report)
         self.db.flush()
 
-        # 4. 记录洞察报告
+        # 5. 记录洞察报告
         insight_report = InsightReport(
             workspace_id=self.workspace_id,
             template_id=template_id,
@@ -292,6 +295,55 @@ class InsightGenerator:
         self.db.commit()
         self.db.refresh(report)
         return report
+
+    def _generate_report_title(self, purpose: str) -> str:
+        """生成报告标题：洞察报告-{主题}相关报告-{YYYYMMDD}。优先 LLM 提取主题，失败时规则提取。"""
+        from datetime import datetime
+        import re
+        date_str = datetime.now().strftime("%Y%m%d")
+
+        # 规则提取候选主题：去掉查询动词/时间词/数量词，取第一个业务名词短语
+        def _rule_topic(text: str) -> str:
+            t = text
+            for kw in ("查询", "统计", "分析", "展示", "列出", "获取", "计算", "求", "查看", "对比", "对比分析"):
+                t = t.replace(kw, "")
+            t = re.sub(r"近\s*\d+\s*[日天月年]", "", t)
+            t = re.sub(r"(每[日天月年]|每日|每天|月度|每月|年度|今年|本月|本周|今日|昨天)", "", t)
+            t = re.sub(r"(前\s*\d+|最多|最少|占比|排名|第\s*\d+|前三|前十)", "", t)
+            t = re.sub(r"^各[部门个类种项]", "", t)  # 去掉"各部门"等限定
+            t = re.sub(r"[，,。.；;、].*$", "", t)  # 取第一个分句
+            t = re.sub(r"[的之与和或及\s]", "", t)
+            return t[:8] if t else "综合分析"
+
+        topic = _rule_topic(purpose)
+
+        # LLM 增强：从返回中正则提取 2-8 个汉字的主题词
+        _META_WORDS = {"核心业务主题词", "主题词", "业务主题", "分析目的", "核心主题",
+                        "业务名词", "关键词", "核心词", "主题", "答案", "结果"}
+        _GENERIC_WORDS = {"各部门", "员工", "用户", "数据", "业务", "流程", "记录",
+                           "信息", "情况", "内容", "明细", "列表", "汇总", "统计"}
+        if self.llm and self.llm.configured:
+            try:
+                resp = self.llm.chat([
+                    {"role": "user", "content": f"从以下分析目的中提取一个2-8个汉字的核心业务主题词，只输出主题词：\n{purpose}"},
+                ], temperature=0.1, max_tokens=100)
+                matches = re.findall(r"[\u4e00-\u9fa5]{2,8}", resp or "")
+                candidates = [m for m in matches
+                              if m not in _META_WORDS
+                              and m not in _GENERIC_WORDS
+                              and len(m) >= 3
+                              and not any(v in m for v in (
+                                  "查询", "统计", "分析", "展示", "获取", "计算", "思考", "过程",
+                                  "输出", "只输", "请输", "提取", "核心业", "业务主", "主题词"))]
+                if candidates:
+                    # 取最长的候选（更具体），与规则结果比较取更长的
+                    llm_topic = max(candidates, key=len)
+                    if len(llm_topic) >= len(topic):
+                        topic = llm_topic
+            except Exception:  # noqa: BLE001
+                pass
+
+        return f"洞察报告-{topic}相关报告-{date_str}"
 
     def save_template(self, config: InsightConfig, name: str,
                       description: str = "", prompt_template_id: int | None = None,
