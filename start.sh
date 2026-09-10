@@ -5,12 +5,13 @@
 # 功能：
 #   1. 同时启动后端（FastAPI + uvicorn，端口 8001）与前端（Vite，端口 3001）
 #   2. 启动前若端口被占用，自动停止占用进程（SIGTERM → 超时 SIGKILL）后再启动，避免半启动
-#   3. 保持前台运行，实时滚动显示两个服务的日志（logs/backend.log、logs/frontend.log）
-#   4. 按 Ctrl+C 停止时：
+#   3. 每次启动自动清理并重建日志文件（logs/backend.log、logs/frontend.log），从全新日志开始
+#   4. 保持前台运行，实时滚动显示两个服务的日志
+#   5. 按 Ctrl+C 停止时：
 #      - 先向后端 uvicorn 发送 SIGINT，触发 FastAPI shutdown 事件 → 显式停止定时任务调度线程 → 进程退出
 #      - 再停止前端 Vite 进程
 #      - 最后清理日志展示进程
-#   5. 任一服务意外退出（如端口冲突、崩溃）时自动整体清理，不残留
+#   6. 任一服务意外退出（如端口冲突、崩溃）时自动整体清理，不残留
 #
 # 用法：./start.sh   （在项目根目录执行；如需其他端口：BACKEND_PORT=9001 FRONTEND_PORT=5173 ./start.sh）
 # 提示：如开启后端热重载（--reload），uvicorn 会额外派生子进程，Ctrl+C 仍可整体退出
@@ -32,6 +33,10 @@ BACKEND_LOG="$LOG_DIR/backend.log"
 FRONTEND_LOG="$LOG_DIR/frontend.log"
 
 mkdir -p "$LOG_DIR"
+
+# ---- 清理并重建日志文件：每次启动都从全新的日志开始，避免旧日志累积 ----
+rm -f "$BACKEND_LOG" "$FRONTEND_LOG"
+touch "$BACKEND_LOG" "$FRONTEND_LOG"
 
 # ---- 环境检查 --------------------------------------------------------------
 if [[ ! -x "$UVICORN_BIN" ]]; then

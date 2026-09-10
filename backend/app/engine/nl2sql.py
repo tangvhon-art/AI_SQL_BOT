@@ -82,8 +82,8 @@ SYSTEM_PROMPT = """你是企业数据问数助手，负责把用户中文问题�
 3. 关联条件**严格遵循【JOIN 路径】提供的主键-外键关联**，无自定义、无错误关联；【JOIN 路径】中未出现的表间关系禁止自行假设。
 
 ## 三、语法编写规范（强制）
-1. 表/字段必须使用**简洁易懂的别名**，字段引用无歧义（多表同名字段必须加表别名）；**同一条 SQL 中每个表/子查询的别名必须唯一**（禁止多个 FROM/JOIN 表使用相同别名，如 `FROM a t, b t`），多表 JOIN 时用 t1/t2 或有意义的缩写区分；
-2. 复杂查询**优先使用 CTE(WITH子句)** 拆分业务逻辑，禁止嵌套过深；
+1. 表/字段必须使用**简洁易懂的别名**，字段引用无歧义；**同一条 SQL 中每个表/子查询的别名必须唯一**（禁止多个 FROM/JOIN 表使用相同别名，如 `FROM a t, b t`），多表 JOIN 时用 t1/t2 或有意义的缩写区分；**多表 JOIN 时，所有在多张表中可能同名的字段（尤其 id、create_time、update_time、create_at、update_at、status、name、title、type 等）在 SELECT/WHERE/GROUP BY/ORDER BY/HAVING 中必须加表别名限定**（如 `t1.create_time`、`t2.id`），禁止写无表限定的同名字段（否则执行报 ambiguous column 错误）；
+2. 复杂查询**优先使用 CTE(WITH子句)** 拆分业务逻辑，禁止嵌套过深；**CTE 中已别名化的列，外层查询必须使用别名，禁止再引用原始列名**（如 CTE 内 `title AS 流程名称`，外层只能用 `流程名称`，不能用 `title`）；
 3. 支持语法：子查询、`GROUP BY`/`HAVING`、`ORDER BY`、`LIMIT`(分页)、`WHERE`、`DISTINCT`、聚合函数(`SUM/COUNT/AVG/MAX/MIN`)、条件判断；
 4. 代码要求：**简洁高效、无冗余逻辑、无语法错误**；
 5. 严格贴合需求：**不新增无关条件、不返回多余字段、不修改业务逻辑**。
@@ -146,7 +146,8 @@ LIMIT 分页参数;
 16. **不得自行脑补过滤条件**：WHERE / HAVING 条件必须严格来自用户问题中**明确声明**的筛选要求（如"状态=已通过"、"近7日"、"项目名包含X"等）；**禁止**自行添加用户未提及的过滤条件（如 `status = 1`、`is_active = 1`、`type = 'xxx'`、部门/人员限制等），即使字段注释暗示了业务含义或"看起来应该过滤"。若用户问题未提及某字段，则该字段不得出现在 WHERE / HAVING 中（软删 `is_deleted = 0` 按规则 7 自动处理，不在此限）；时间范围仅在用户明确提及时添加（如"近7日"、"今天"、"9月"）
 17. **多子查询时间口径必须一致**：同一问题拆出的多个子查询，时间字段必须统一，禁止混用不同时间字段（如一个用开始时间、另一个用创建时间）导致口径不一致；按日期分组时也要用同一时间字段做 DATE_FORMAT
 18. **CTE 别名作用域**：使用 WITH ... AS (...) 定义 CTE 时，若在 CTE 内部将某列设置了别名（如 `原始列 AS 别名`），则该 CTE 的输出列只有别名，后续 CTE 及主查询引用该列时**必须使用别名**，禁止再使用原始列名（否则触发 Unknown column 错误）；若外层查询需要使用原始列名，则 CTE 内部不要对该列设置别名，或同时选中原始列与别名列
-19. **外键 ID 必须关联名称展示**：当 SELECT / GROUP BY / ORDER BY 中使用外键 ID 字段（以 _id 结尾的关联字段）时，**必须**通过【ID 关联展示】中列出的关系 JOIN 关联表，使用关联表的名称/标题字段做展示和分组维度，**禁止**直接用 ID 数值做统计维度展示（用户看到的应是名称而非数字 ID）；JOIN 写法：`LEFT JOIN 关联表 ON 关联表.主键 = 源表.外键ID`，SELECT/GROUP BY 中替换为 `关联表.名称字段`"""
+19. **外键 ID 必须关联名称展示**：当 SELECT / GROUP BY / ORDER BY 中使用外键 ID 字段（以 _id 结尾的关联字段）时，**必须**通过【ID 关联展示】中列出的关系 JOIN 关联表，使用关联表的名称/标题字段做展示和分组维度，**禁止**直接用 ID 数值做统计维度展示（用户看到的应是名称而非数字 ID）；JOIN 写法：`LEFT JOIN 关联表 ON 关联表.主键 = 源表.外键ID`，SELECT/GROUP BY 中替换为 `关联表.名称字段`
+20. **禁止臆造表中不存在的字段**：SQL 中使用的每个字段必须存在于【可用表与字段】中列出的确切字段名，**禁止**自行添加常见但本表不存在的字段（如 `is_deleted`、`deleted_at`、`is_active`、`tenant_id` 等，即使其他表有或业务上"看起来应该有"）；WHERE 中也禁止使用这些不存在的字段做过滤条件；不确定字段是否存在时，从【可用表与字段】中确认后再使用"""
 
 
 def _schema_text(datasource_id: int, top_tables: list[TableMeta] | None = None,
@@ -1488,45 +1489,54 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
             logger.warning("[NL2SQL] 校验失败原因: %s | 异常类型: %s", last_error[:200], type(exc).__name__)
-            # 确定性自动修复：字段不存在 / 未提及过滤字段 → 直接移除对应 WHERE 条件，无需 LLM 重试
-            bad_fields = _extract_bad_fields(last_error)
-            if bad_fields:
-                fixed_sql = _auto_strip_invalid_filters(sql, bad_fields)
-                if fixed_sql != sql:
-                    try:
-                        fixed_sql = _run_validations(fixed_sql, datasource_id, question, dialect)
-                        logger.info("[NL2SQL] 确定性自动修复成功: 移除字段 %s, 校验通过", bad_fields)
-                        yield {"type": "result", "result": {
-                            "intent": "query", "sql": fixed_sql,
-                            "explain": content, "tables": [t.table_name for t in tables],
-                            "selected_tables": select_meta.get("raw", []),
-                            "select_source": select_meta.get("source", ""),
-                            "rag_hits": _rag_hits}}
-                        return
-                    except Exception:  # noqa: BLE001
-                        logger.info("[NL2SQL] 确定性自动修复后仍校验失败，回退 LLM 重试")
-            # 确定性自动修复：歧义列 → 用 FROM 第一个表限定
-            if "列歧义" in last_error or "ambiguous" in last_error.lower():
-                fixed_sql = _auto_qualify_ambiguous_columns(sql, datasource_id)
-                if fixed_sql != sql:
-                    try:
-                        fixed_sql = _run_validations(fixed_sql, datasource_id, question, dialect)
-                        logger.info("[NL2SQL] 确定性自动修复成功: 歧义列已加表限定, 校验通过")
-                        yield {"type": "result", "result": {
-                            "intent": "query", "sql": fixed_sql,
-                            "explain": content, "tables": [t.table_name for t in tables],
-                            "selected_tables": select_meta.get("raw", []),
-                            "select_source": select_meta.get("source", ""),
-                            "rag_hits": _rag_hits}}
-                        return
-                    except Exception:  # noqa: BLE001
-                        logger.info("[NL2SQL] 歧义列自动修复后仍校验失败，回退 LLM 重试")
+            # 确定性自动修复（链式）：依次尝试多种修复策略，全部失败才回退 LLM 重试
+            auto_fixed = sql
+            fixed_reasons: list[str] = []
+            for _attempt in range(3):  # 最多 3 轮链式修复
+                changed = False
+                # 策略1：移除不存在的过滤字段（is_deleted 等幻觉）
+                bad_fields = _extract_bad_fields(last_error if _attempt == 0 else "")
+                if not bad_fields and _attempt == 0:
+                    bad_fields = _extract_bad_fields(last_error)
+                if bad_fields:
+                    stripped = _auto_strip_invalid_filters(auto_fixed, bad_fields)
+                    if stripped != auto_fixed:
+                        auto_fixed = stripped
+                        fixed_reasons.append(f"移除字段{bad_fields}")
+                        changed = True
+                # 策略2：歧义列加表限定（JOIN 时 id/create_time 等同名字段）
+                qualified = _auto_qualify_ambiguous_columns(auto_fixed, datasource_id)
+                if qualified != auto_fixed:
+                    auto_fixed = qualified
+                    fixed_reasons.append("歧义列加表限定")
+                    changed = True
+                if not changed:
+                    break
+                # 修复后重新校验
+                try:
+                    auto_fixed = _run_validations(auto_fixed, datasource_id, question, dialect)
+                    logger.info("[NL2SQL] 确定性自动修复成功: %s, 校验通过", " + ".join(fixed_reasons))
+                    yield {"type": "result", "result": {
+                        "intent": "query", "sql": auto_fixed,
+                        "explain": content, "tables": [t.table_name for t in tables],
+                        "selected_tables": select_meta.get("raw", []),
+                        "select_source": select_meta.get("source", ""),
+                        "rag_hits": _rag_hits}}
+                    return
+                except Exception as retry_exc:  # noqa: BLE001
+                    last_error = str(retry_exc)
+                    continue
+            logger.info("[NL2SQL] 确定性自动修复后仍校验失败，回退 LLM 重试")
             yield {"type": "retry", "msg": "SQL 校验中，正在修正…"}
             messages.append({"role": "assistant", "content": content})
             messages.append({"role": "user",
                              "content": f"SQL 校验失败：{last_error}。请仅修正报错内容，**保持用户问题的查询语义不变**"
                                          "（项目/时间/状态等过滤条件、分组维度、计数/聚合形态都不得删减或改变）。"
-                                         "修正后用 ```sql 代码块重新输出完整的 SELECT SQL；SQL 只能使用【可用表与字段】中列出的确切表名和字段名。"})
+                                         "修正后用 ```sql 代码块重新输出完整的 SELECT SQL；SQL 只能使用【可用表与字段】中列出的确切表名和字段名。"
+                                         "常见修正：①字段不存在（如 is_deleted）→ 直接删除该过滤条件，不要替换为其他字段；"
+                                         "②列歧义（ambiguous column）→ 给该字段加表别名限定（如 t1.create_time），所有子句都要限定；"
+                                         "③CTE 别名作用域 → 外层查询使用 CTE 输出的别名列名，不要引用 CTE 内部原始列名；"
+                                         "④表别名重复 → 每个表/子查询使用唯一别名。"})
 
     # LLM 已配置但连续生成失败：抛错误，不返回与问题无关的降级假数据
     if llm is not None:
@@ -1927,45 +1937,54 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
             logger.warning("[NL2SQL] 校验失败原因: %s | 异常类型: %s", last_error[:200], type(exc).__name__)
-            # 确定性自动修复：字段不存在 / 未提及过滤字段 → 直接移除对应 WHERE 条件，无需 LLM 重试
-            bad_fields = _extract_bad_fields(last_error)
-            if bad_fields:
-                fixed_sql = _auto_strip_invalid_filters(sql, bad_fields)
-                if fixed_sql != sql:
-                    try:
-                        fixed_sql = _run_validations(fixed_sql, datasource_id, question, dialect)
-                        logger.info("[NL2SQL] 确定性自动修复成功: 移除字段 %s, 校验通过", bad_fields)
-                        yield {"type": "result", "result": {
-                            "intent": "query", "sql": fixed_sql,
-                            "explain": content, "tables": [t.table_name for t in tables],
-                            "selected_tables": select_meta.get("raw", []),
-                            "select_source": select_meta.get("source", ""),
-                            "rag_hits": _rag_hits}}
-                        return
-                    except Exception:  # noqa: BLE001
-                        logger.info("[NL2SQL] 确定性自动修复后仍校验失败，回退 LLM 重试")
-            # 确定性自动修复：歧义列 → 用 FROM 第一个表限定
-            if "列歧义" in last_error or "ambiguous" in last_error.lower():
-                fixed_sql = _auto_qualify_ambiguous_columns(sql, datasource_id)
-                if fixed_sql != sql:
-                    try:
-                        fixed_sql = _run_validations(fixed_sql, datasource_id, question, dialect)
-                        logger.info("[NL2SQL] 确定性自动修复成功: 歧义列已加表限定, 校验通过")
-                        yield {"type": "result", "result": {
-                            "intent": "query", "sql": fixed_sql,
-                            "explain": content, "tables": [t.table_name for t in tables],
-                            "selected_tables": select_meta.get("raw", []),
-                            "select_source": select_meta.get("source", ""),
-                            "rag_hits": _rag_hits}}
-                        return
-                    except Exception:  # noqa: BLE001
-                        logger.info("[NL2SQL] 歧义列自动修复后仍校验失败，回退 LLM 重试")
+            # 确定性自动修复（链式）：依次尝试多种修复策略，全部失败才回退 LLM 重试
+            auto_fixed = sql
+            fixed_reasons: list[str] = []
+            for _attempt in range(3):  # 最多 3 轮链式修复
+                changed = False
+                # 策略1：移除不存在的过滤字段（is_deleted 等幻觉）
+                bad_fields = _extract_bad_fields(last_error if _attempt == 0 else "")
+                if not bad_fields and _attempt == 0:
+                    bad_fields = _extract_bad_fields(last_error)
+                if bad_fields:
+                    stripped = _auto_strip_invalid_filters(auto_fixed, bad_fields)
+                    if stripped != auto_fixed:
+                        auto_fixed = stripped
+                        fixed_reasons.append(f"移除字段{bad_fields}")
+                        changed = True
+                # 策略2：歧义列加表限定（JOIN 时 id/create_time 等同名字段）
+                qualified = _auto_qualify_ambiguous_columns(auto_fixed, datasource_id)
+                if qualified != auto_fixed:
+                    auto_fixed = qualified
+                    fixed_reasons.append("歧义列加表限定")
+                    changed = True
+                if not changed:
+                    break
+                # 修复后重新校验
+                try:
+                    auto_fixed = _run_validations(auto_fixed, datasource_id, question, dialect)
+                    logger.info("[NL2SQL] 确定性自动修复成功: %s, 校验通过", " + ".join(fixed_reasons))
+                    yield {"type": "result", "result": {
+                        "intent": "query", "sql": auto_fixed,
+                        "explain": content, "tables": [t.table_name for t in tables],
+                        "selected_tables": select_meta.get("raw", []),
+                        "select_source": select_meta.get("source", ""),
+                        "rag_hits": _rag_hits}}
+                    return
+                except Exception as retry_exc:  # noqa: BLE001
+                    last_error = str(retry_exc)
+                    continue
+            logger.info("[NL2SQL] 确定性自动修复后仍校验失败，回退 LLM 重试")
             yield {"type": "retry", "msg": "SQL 校验中，正在修正…"}
             messages.append({"role": "assistant", "content": content})
             messages.append({"role": "user",
                              "content": f"SQL 校验失败：{last_error}。请仅修正报错内容，**保持用户问题的查询语义不变**"
                                          "（项目/时间/状态等过滤条件、分组维度、计数/聚合形态都不得删减或改变）。"
-                                         "修正后用 ```sql 代码块重新输出完整的 SELECT SQL；SQL 只能使用【可用表与字段】中列出的确切表名和字段名。"})
+                                         "修正后用 ```sql 代码块重新输出完整的 SELECT SQL；SQL 只能使用【可用表与字段】中列出的确切表名和字段名。"
+                                         "常见修正：①字段不存在（如 is_deleted）→ 直接删除该过滤条件，不要替换为其他字段；"
+                                         "②列歧义（ambiguous column）→ 给该字段加表别名限定（如 t1.create_time），所有子句都要限定；"
+                                         "③CTE 别名作用域 → 外层查询使用 CTE 输出的别名列名，不要引用 CTE 内部原始列名；"
+                                         "④表别名重复 → 每个表/子查询使用唯一别名。"})
 
     # LLM 已配置但连续生成失败：抛错误，不返回与问题无关的降级假数据
     if llm is not None:
