@@ -945,7 +945,7 @@ def parse_query_spec(question: str, datasource_id: int, workspace_id: int,
             llm_spec = _spec_from_llm_data(data, question, prev_spec)
             if llm_spec and llm_spec.metrics:
                 spec = llm_spec
-                spec.schema = schema or ""
+                spec.schema_name = schema or ""
                 _guidance_source = "llm"
                 if spec.time.start == "" or spec.time.expr == "近30天（默认）":
                     _extract_time(question, spec)
@@ -955,14 +955,14 @@ def parse_query_spec(question: str, datasource_id: int, workspace_id: int,
             else:
                 logger.warning("[问数][spec] LLM 返回空/无效，回退规则引擎")
                 spec = _rule_extract_spec(question, candidates, dicts or {})
-                spec.schema = schema or ""
+                spec.schema_name = schema or ""
         else:
             spec = _rule_extract_spec(question, candidates, dicts or {})
-            spec.schema = schema or ""
+            spec.schema_name = schema or ""
     else:
         # 无 LLM 或澄清轮次 → 规则引擎（L-C 兜底）
         spec = _rule_extract_spec(question, candidates, dicts or {})
-        spec.schema = schema or ""
+        spec.schema_name = schema or ""
 
     # 多轮继承（规则路径）：省略式追问
     if prev_spec and not spec.metrics and spec.intent == "value":

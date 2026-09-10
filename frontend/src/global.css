@@ -1,10 +1,43 @@
-/* ============ Ant Design Pro v6 · Glass（玻璃拟态）风格 ============ */
+/* ============================================================
+   AI SQL Bot · 海外版后台管理风格（参考 QueryAI · 数据控制台）
+   配色：紫靛蓝主色 + 橙色伙伴色 · 冷纸中性阶 · 白底卡片 · 柔和分层阴影
+   ============================================================ */
 :root {
-  --glass-bg: rgba(255, 255, 255, 0.6);
-  --glass-bg-strong: rgba(255, 255, 255, 0.72);
-  --glass-border: rgba(255, 255, 255, 0.72);
-  --glass-shadow: 0 8px 32px rgba(31, 58, 147, 0.1);
-  --glass-blur: blur(18px) saturate(150%);
+  /* 基底 —— 浅灰中性阶 */
+  --page: #F5F6F8;
+  --bg: #ffffff;
+  --panel-2: #F8F9FB;
+  --border: rgba(30, 35, 60, .08);
+  /* 墨三级 */
+  --ink-1: #1A1D29;
+  --ink-2: #3D4252;
+  --ink-3: #8B90A0;
+  /* 品牌 —— 紫靛蓝主色 + 橙色伙伴色 */
+  --accent: #6C5CE7;
+  --accent-2: #F97316;
+  --accent-soft: rgba(108, 92, 231, .10);
+  --on-accent: #fff;
+  --glow: rgba(108, 92, 231, .30);
+  /* 语义色 */
+  --up: #10B981;
+  --down: #EF4444;
+  --warn: #F59E0B;
+  --warn-ink: #92400E;
+  --bad-ink: #991B1B;
+  --ok-ink: #065F46;
+  /* 圆角四角色 */
+  --r-shell: 16px;
+  --r-card: 12px;
+  --r-ctrl: 8px;
+  --r-pill: 999px;
+  /* 阴影 —— 多层有色 */
+  --shadow-card:
+    0 1px 2px rgba(15, 35, 34, .04),
+    0 6px 16px -4px rgba(15, 35, 34, .06),
+    0 20px 40px -16px rgba(15, 35, 34, .10);
+  --shadow-modal:
+    0 2px 8px rgba(15, 35, 34, .08),
+    0 24px 56px -12px rgba(15, 35, 34, .22);
 }
 
 html,
@@ -15,121 +48,120 @@ body,
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
-    'Microsoft YaHei', sans-serif;
+  background: var(--page);
+  color: var(--ink-2);
+  font-family: 'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'cv11', 'ss01';
 }
 
-/* 全局光斑背景 */
+/* 全局底色：冷纸灰 + 极淡品牌色晕（上角紫、下角橙），保持清爽 */
 .glass-app {
   position: relative;
   min-height: 100vh;
   background:
-    radial-gradient(1100px 700px at 12% -8%, rgba(22, 119, 255, 0.16), transparent 60%),
-    radial-gradient(900px 650px at 88% 8%, rgba(114, 46, 209, 0.12), transparent 55%),
-    radial-gradient(1000px 800px at 50% 115%, rgba(0, 174, 239, 0.14), transparent 60%),
-    linear-gradient(160deg, #f2f6ff 0%, #eef4ff 45%, #f4f0ff 100%);
+    radial-gradient(900px 480px at 94% -8%, rgba(108, 92, 231, .05), transparent 60%),
+    radial-gradient(760px 420px at -4% 104%, rgba(249, 115, 22, .035), transparent 55%),
+    var(--page);
   background-attachment: fixed;
 }
-.glass-app::before,
-.glass-app::after {
-  content: '';
-  position: fixed;
-  border-radius: 50%;
-  filter: blur(70px);
-  pointer-events: none;
-  z-index: 0;
-}
-.glass-app::before {
-  width: 480px;
-  height: 480px;
-  left: -140px;
-  top: 10%;
-  background: rgba(22, 119, 255, 0.18);
-}
-.glass-app::after {
-  width: 420px;
-  height: 420px;
-  right: -120px;
-  bottom: 6%;
-  background: rgba(114, 46, 209, 0.14);
-}
 
-/* ---------- 侧边栏玻璃 ---------- */
+/* ---------- 侧边栏：白底浅色 ---------- */
 .glass-sider.ant-layout-sider {
-  background: rgba(12, 28, 58, 0.52) !important;
-  backdrop-filter: blur(22px) saturate(150%);
-  -webkit-backdrop-filter: blur(22px) saturate(150%);
-  border-right: 1px solid rgba(255, 255, 255, 0.14);
-  box-shadow: 4px 0 24px rgba(20, 40, 90, 0.12);
+  background: var(--bg) !important;
+  border-right: 1px solid var(--border);
+  box-shadow: none;
   z-index: 2;
 }
-.glass-sider .ant-menu-dark {
+.glass-sider .ant-menu {
+  background: transparent !important;
+  border-inline-end: none !important;
+}
+.glass-sider .ant-menu-item,
+.glass-sider .ant-menu-submenu-title {
+  height: 40px;
+  line-height: 40px;
+  margin-inline: 8px;
+  width: calc(100% - 16px);
+  border-radius: var(--r-ctrl);
+  color: var(--ink-2);
+  font-size: 13.5px;
+  font-weight: 500;
+  transition: all .15s;
+}
+.glass-sider .ant-menu-item:hover,
+.glass-sider .ant-menu-submenu-title:hover {
+  background: var(--panel-2) !important;
+  color: var(--ink-1) !important;
+}
+.glass-sider .ant-menu-item .ant-menu-item-icon,
+.glass-sider .ant-menu-submenu-title .ant-menu-item-icon {
+  color: var(--ink-3);
+}
+.glass-sider .ant-menu-item:hover .ant-menu-item-icon,
+.glass-sider .ant-menu-submenu-title:hover .ant-menu-item-icon {
+  color: var(--ink-1);
+}
+.glass-sider .ant-menu-item-selected {
+  position: relative;
+  background: var(--accent-soft) !important;
+  color: var(--accent) !important;
+  font-weight: 600;
+}
+.glass-sider .ant-menu-item-selected .ant-menu-item-icon {
+  color: var(--accent) !important;
+}
+.glass-sider .ant-menu-item-selected::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 20px;
+  background: var(--accent);
+  border-radius: 0 3px 3px 0;
+}
+/* 二级子菜单 */
+.glass-sider .ant-menu-sub {
   background: transparent !important;
 }
-.glass-sider .ant-menu-dark .ant-menu-item-selected {
-  background: linear-gradient(135deg, rgba(22, 119, 255, 0.85), rgba(105, 177, 255, 0.7)) !important;
-  box-shadow: 0 6px 18px rgba(22, 119, 255, 0.35);
-  border-radius: 10px;
+.glass-sider .ant-menu-sub .ant-menu-item {
+  margin-inline: 8px 18px;
+  width: calc(100% - 26px);
+  color: var(--ink-3);
 }
-.glass-sider .ant-menu-dark .ant-menu-item {
-  border-radius: 10px;
-  margin-inline: 10px;
-  width: calc(100% - 20px);
+.glass-sider .ant-menu-sub .ant-menu-item .ant-menu-item-icon {
+  color: var(--ink-3);
 }
-/* ---------- 二级子菜单：融入深色玻璃，避免违和 ---------- */
-.glass-sider .ant-menu-dark .ant-menu-sub {
-  background: transparent !important;
+.glass-sider .ant-menu-sub .ant-menu-item:hover {
+  background: var(--panel-2);
+  color: var(--ink-1);
 }
-.glass-sider .ant-menu-dark .ant-menu-submenu-title {
-  color: rgba(255, 255, 255, 0.82);
-  border-radius: 10px;
-  margin-inline: 10px;
-  width: calc(100% - 20px);
+.glass-sider .ant-menu-sub .ant-menu-item-selected {
+  background: var(--accent-soft) !important;
+  color: var(--accent) !important;
 }
-.glass-sider .ant-menu-dark .ant-menu-submenu-title:hover {
-  color: rgba(255, 255, 255, 0.95);
-  background: rgba(255, 255, 255, 0.07);
-}
-.glass-sider .ant-menu-dark .ant-menu-submenu-selected .ant-menu-submenu-title {
-  color: #fff;
-}
-.glass-sider .ant-menu-dark .ant-menu-sub .ant-menu-item {
-  color: rgba(255, 255, 255, 0.62);
-  background: transparent;
-  margin-inline: 10px 14px;
-  width: calc(100% - 24px);
-}
-.glass-sider .ant-menu-dark .ant-menu-sub .ant-menu-item .ant-menu-item-icon {
-  color: rgba(255, 255, 255, 0.5);
-}
-.glass-sider .ant-menu-dark .ant-menu-sub .ant-menu-item:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.92);
-}
-.glass-sider .ant-menu-dark .ant-menu-sub .ant-menu-item:hover .ant-menu-item-icon {
-  color: rgba(255, 255, 255, 0.85);
-}
-.glass-sider .ant-menu-dark .ant-menu-sub .ant-menu-item-selected {
-  background: linear-gradient(135deg, rgba(22, 119, 255, 0.55), rgba(105, 177, 255, 0.38)) !important;
-  color: #fff;
-  box-shadow: 0 4px 14px rgba(22, 119, 255, 0.28);
-}
-.glass-sider .ant-menu-dark .ant-menu-sub .ant-menu-item-selected .ant-menu-item-icon {
-  color: #fff;
+.glass-sider .ant-menu-sub .ant-menu-item-selected .ant-menu-item-icon {
+  color: var(--accent) !important;
 }
 .glass-sider .ant-layout-sider-trigger {
-  background: rgba(12, 28, 58, 0.55);
-  backdrop-filter: blur(12px);
+  background: var(--bg);
+  color: var(--ink-3);
+  border-top: 1px solid var(--border);
+}
+.glass-sider .ant-layout-sider-trigger:hover {
+  color: var(--accent);
 }
 
-/* ---------- 顶部 Header 玻璃 ---------- */
+/* ---------- 顶部 Header：白底细线 ---------- */
 .glass-header.ant-layout-header {
-  background: rgba(255, 255, 255, 0.55) !important;
-  backdrop-filter: blur(18px) saturate(160%);
-  -webkit-backdrop-filter: blur(18px) saturate(160%);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.65);
-  box-shadow: 0 1px 10px rgba(31, 58, 147, 0.08);
+  background: var(--bg) !important;
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 4px rgba(15, 35, 34, .03);
   z-index: 3;
 }
 
@@ -138,26 +170,26 @@ body {
   background: transparent !important;
 }
 
-/* ---------- 卡片玻璃 ---------- */
+/* ---------- 卡片：白底圆角、柔和阴影 ---------- */
 .glass-card,
 .glass-page .ant-card {
-  background: var(--glass-bg) !important;
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  border: 1px solid var(--glass-border) !important;
-  border-radius: 16px !important;
-  box-shadow: var(--glass-shadow);
+  background: var(--bg) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--r-card) !important;
+  box-shadow: var(--shadow-card);
   overflow: hidden;
 }
 .glass-page .ant-card-head {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.6);
-  background: rgba(255, 255, 255, 0.25);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  min-height: 52px;
+  padding-inline: 20px;
 }
 .glass-page .ant-card .ant-card-body {
   background: transparent;
 }
 
-/* ---------- 表格透明化 ---------- */
+/* ---------- 表格：浅灰表头、行悬停 ---------- */
 .glass-page .ant-table,
 .glass-page .ant-table-container,
 .glass-page .ant-table-wrapper .ant-table-thead > tr > th,
@@ -165,10 +197,21 @@ body {
   background: transparent !important;
 }
 .glass-page .ant-table-wrapper .ant-table-thead > tr > th {
-  border-bottom: 1px solid rgba(5, 5, 5, 0.06);
+  background: var(--panel-2) !important;
+  color: var(--ink-3) !important;
+  font-weight: 600;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border) !important;
+}
+.glass-page .ant-table-wrapper .ant-table-tbody > tr > td {
+  border-bottom: 1px solid var(--border);
 }
 .glass-page .ant-table-wrapper .ant-table-tbody > tr:hover > td {
-  background: rgba(22, 119, 255, 0.05) !important;
+  background: rgba(108, 92, 231, .04) !important;
+}
+.glass-page .ant-table-wrapper .ant-table-cell-fix-left,
+.glass-page .ant-table-wrapper .ant-table-cell-fix-right {
+  background: var(--bg) !important;
 }
 
 /* ---------- 问数结果表格：点击行可展开 ---------- */
@@ -176,102 +219,116 @@ body {
   cursor: pointer;
 }
 
-/* ---------- 弹窗 / 抽屉玻璃 ---------- */
+/* ---------- 弹窗 / 抽屉：白底、大圆角、深阴影 ---------- */
 .ant-modal-content,
 .ant-drawer-content,
 .ant-drawer-content-wrapper {
-  background: rgba(255, 255, 255, 0.82) !important;
-  backdrop-filter: blur(24px) saturate(150%);
-  -webkit-backdrop-filter: blur(24px) saturate(150%);
-  border: 1px solid rgba(255, 255, 255, 0.8);
+  background: var(--bg) !important;
 }
 .ant-modal-content {
-  border-radius: 18px !important;
-  box-shadow: 0 24px 64px rgba(20, 40, 90, 0.22) !important;
+  border-radius: var(--r-shell) !important;
+  box-shadow: var(--shadow-modal) !important;
+}
+.ant-drawer-content {
+  box-shadow: var(--shadow-modal) !important;
 }
 
-/* ---------- 表单输入玻璃 ---------- */
+/* ---------- 表单输入：白底细边框、聚焦紫环 ---------- */
 .glass-page .ant-input,
 .glass-page .ant-input-affix-wrapper,
-.glass-page .ant-select-content,
 .glass-page .ant-picker,
 .glass-page .ant-input-number {
-  background: rgba(255, 255, 255, 0.65) !important;
-  backdrop-filter: blur(8px);
-  border-color: rgba(255, 255, 255, 0.85);
-  box-shadow: inset 0 1px 3px rgba(31, 58, 147, 0.04);
+  background: var(--bg) !important;
+  border-color: rgba(30, 35, 60, .12);
+}
+.glass-page .ant-input:hover,
+.glass-page .ant-input-affix-wrapper:hover,
+.glass-page .ant-picker:hover,
+.glass-page .ant-input-number:hover {
+  border-color: var(--accent) !important;
+}
+.glass-page .ant-input:focus,
+.glass-page .ant-input-affix-wrapper-focused,
+.glass-page .ant-picker-focused,
+.glass-page .ant-input-number-focused {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--accent-soft) !important;
 }
 
-/* ---------- 下拉框统一玻璃（全局，适配 antd v6 结构） ---------- */
+/* ---------- 下拉框统一（全局，适配 antd v6 结构） ---------- */
 .glass-select .ant-select-content {
-  background: rgba(255, 255, 255, 0.6) !important;
-  backdrop-filter: blur(10px) saturate(150%);
-  -webkit-backdrop-filter: blur(10px) saturate(150%);
-  border: 1px solid rgba(255, 255, 255, 0.85) !important;
-  box-shadow: 0 2px 10px rgba(31, 58, 147, 0.06);
-  border-radius: 10px;
+  background: var(--bg) !important;
+  border: 1px solid rgba(30, 35, 60, .12) !important;
+  box-shadow: none;
+  border-radius: var(--r-ctrl);
 }
 .glass-select:hover .ant-select-content {
-  border-color: rgba(105, 177, 255, 0.9) !important;
+  border-color: var(--accent) !important;
 }
 .ant-select-dropdown {
-  background: rgba(255, 255, 255, 0.88) !important;
-  backdrop-filter: blur(22px) saturate(160%);
-  -webkit-backdrop-filter: blur(22px) saturate(160%);
-  border: 1px solid rgba(255, 255, 255, 0.9);
-  border-radius: 12px !important;
-  box-shadow: 0 16px 48px rgba(31, 58, 147, 0.18) !important;
+  background: var(--bg) !important;
+  border: 1px solid var(--border);
+  border-radius: 10px !important;
+  box-shadow: var(--shadow-modal) !important;
   padding: 4px;
 }
 .ant-select-dropdown .ant-select-item-option-selected {
-  background: rgba(22, 119, 255, 0.12) !important;
+  background: rgba(108, 92, 231, .12) !important;
   font-weight: 500;
 }
 .ant-select-dropdown .ant-select-item-option-active {
-  background: rgba(22, 119, 255, 0.06) !important;
+  background: rgba(108, 92, 231, .06) !important;
 }
 .ant-select-dropdown .ant-select-item {
-  border-radius: 8px !important;
+  border-radius: var(--r-ctrl) !important;
 }
-.glass-page .ant-btn {
-  box-shadow: 0 4px 14px rgba(22, 119, 255, 0.12);
+.ant-select-dropdown .ant-select-item-option-selected .ant-select-item-option-content {
+  color: var(--accent);
 }
+
+/* ---------- 按钮 ---------- */
 .glass-page .ant-btn-primary,
 .glass-chat-input .ant-btn-primary {
-  background: linear-gradient(135deg, #1677ff, #4096ff) !important;
+  background: var(--accent) !important;
   border: none;
-  box-shadow: 0 6px 18px rgba(22, 119, 255, 0.32);
+  box-shadow: 0 2px 8px var(--glow);
 }
 .glass-page .ant-btn-primary:hover,
 .glass-chat-input .ant-btn-primary:hover {
-  background: linear-gradient(135deg, #0958d9, #1677ff) !important;
+  background: #5A4BD1 !important;
+}
+.glass-page .ant-btn-primary:active,
+.glass-chat-input .ant-btn-primary:active {
+  background: #4F41BE !important;
+}
+.glass-page .ant-btn-default {
+  background: var(--bg);
 }
 
-/* ---------- 标签 / 分割线 ---------- */
+/* ---------- 标签：柔和胶囊 ---------- */
 .glass-page .ant-tag {
-  backdrop-filter: blur(8px);
+  border-radius: var(--r-pill);
+  padding-inline: 10px;
 }
 .glass-page .ant-divider {
-  border-color: rgba(5, 5, 5, 0.08);
+  border-color: rgba(5, 5, 5, .08);
 }
 
 /* ---------- 登录页 ---------- */
 .glass-login-card.ant-card {
-  background: rgba(255, 255, 255, 0.6) !important;
-  backdrop-filter: blur(26px) saturate(160%);
-  -webkit-backdrop-filter: blur(26px) saturate(160%);
-  border: 1px solid rgba(255, 255, 255, 0.75);
-  border-radius: 22px !important;
-  box-shadow: 0 24px 80px rgba(20, 40, 90, 0.24);
+  background: var(--bg) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--r-shell) !important;
+  box-shadow: var(--shadow-modal) !important;
 }
 
-/* ---------- 聊天区玻璃 ---------- */
+/* ---------- 聊天区 ---------- */
 .glass-msg-user {
   max-width: 80%;
-  background: linear-gradient(135deg, rgba(22, 119, 255, 0.9), rgba(64, 150, 255, 0.82)) !important;
+  background: linear-gradient(135deg, #6C5CE7 0%, #8B7CF6 100%) !important;
   color: #fff !important;
   border-radius: 14px 14px 4px 14px !important;
-  box-shadow: 0 8px 24px rgba(22, 119, 255, 0.28);
+  box-shadow: 0 8px 24px rgba(108, 92, 231, .28);
   border: none !important;
 }
 /* 窄屏：用户问题气泡放宽到 92%，长问题换行更少、完整可读 */
@@ -281,12 +338,15 @@ body {
   }
 }
 .glass-msg-assistant {
-  background: rgba(255, 255, 255, 0.62) !important;
-  backdrop-filter: blur(16px) saturate(150%);
-  -webkit-backdrop-filter: blur(16px) saturate(150%);
-  border: 1px solid rgba(255, 255, 255, 0.75) !important;
+  background: var(--bg) !important;
+  border: 1px solid var(--border) !important;
   border-radius: 14px 14px 14px 4px !important;
-  box-shadow: var(--glass-shadow);
+  box-shadow: var(--shadow-card);
+}
+.glass-chat-input {
+  background: var(--bg) !important;
+  border: 1px solid var(--border) !important;
+  box-shadow: var(--shadow-card);
 }
 .glass-chat-input .ant-input {
   background: transparent !important;
@@ -322,22 +382,24 @@ body {
   }
 }
 
-/* ============ 玻璃风格滚动条（全站统一） ============ */
+/* ============ 滚动条（全站统一） ============ */
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 *::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.25);
+  background: rgba(30, 35, 60, .04);
   border-radius: 8px;
 }
 *::-webkit-scrollbar-thumb {
-  background: linear-gradient(180deg, rgba(22, 119, 255, 0.38), rgba(105, 177, 255, 0.3));
+  background: rgba(108, 92, 231, .30);
   border-radius: 8px;
-  border: 2px solid rgba(255, 255, 255, 0.35);
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
 *::-webkit-scrollbar-thumb:hover {
-  background: linear-gradient(180deg, rgba(22, 119, 255, 0.6), rgba(105, 177, 255, 0.5));
+  background: rgba(108, 92, 231, .5);
+  background-clip: content-box;
 }
 *::-webkit-scrollbar-corner {
   background: transparent;
@@ -345,7 +407,7 @@ body {
 /* Firefox */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(22, 119, 255, 0.4) rgba(255, 255, 255, 0.25);
+  scrollbar-color: rgba(108, 92, 231, .35) rgba(30, 35, 60, .04);
 }
 
 /* 步骤条脉冲动画 */
@@ -358,7 +420,7 @@ body {
 .md-body {
   font-size: 14px;
   line-height: 1.75;
-  color: rgba(0, 0, 0, 0.88);
+  color: var(--ink-2);
   word-break: break-word;
 }
 .md-body > *:first-child { margin-top: 0; }
@@ -368,6 +430,7 @@ body {
   margin: 1em 0 0.5em;
   font-weight: 600;
   line-height: 1.4;
+  color: var(--ink-1);
 }
 .md-body h1 { font-size: 1.4em; }
 .md-body h2 { font-size: 1.25em; }
@@ -378,7 +441,8 @@ body {
 .md-body code {
   padding: 0.15em 0.4em;
   border-radius: 4px;
-  background: rgba(0, 0, 0, 0.06);
+  background: rgba(108, 92, 231, .08);
+  color: #5A4BD1;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.9em;
 }
@@ -386,13 +450,13 @@ body {
   margin: 0.6em 0;
   padding: 12px 14px;
   border-radius: 8px;
-  background: #1e1e2e;
+  background: #1E1D2E;
   overflow-x: auto;
 }
 .md-body pre code {
   padding: 0;
   background: transparent;
-  color: #e6e6e6;
+  color: #E6E6F2;
   font-size: 13px;
   line-height: 1.6;
 }
@@ -403,21 +467,22 @@ body {
   font-size: 13px;
 }
 .md-body th, .md-body td {
-  border: 1px solid rgba(0, 0, 0, 0.12);
+  border: 1px solid rgba(30, 35, 60, .12);
   padding: 6px 10px;
   text-align: left;
 }
 .md-body th {
-  background: rgba(22, 119, 255, 0.06);
+  background: var(--accent-soft);
+  color: var(--ink-1);
   font-weight: 600;
 }
 .md-body blockquote {
   margin: 0.6em 0;
   padding: 4px 12px;
-  border-left: 3px solid rgba(22, 119, 255, 0.4);
-  background: rgba(22, 119, 255, 0.04);
-  color: rgba(0, 0, 0, 0.65);
+  border-left: 3px solid rgba(108, 92, 231, .4);
+  background: rgba(108, 92, 231, .04);
+  color: var(--ink-3);
 }
-.md-body a { color: #1677ff; text-decoration: none; }
+.md-body a { color: var(--accent); text-decoration: none; }
 .md-body a:hover { text-decoration: underline; }
-.md-body hr { border: none; border-top: 1px solid rgba(0, 0, 0, 0.1); margin: 0.8em 0; }
+.md-body hr { border: none; border-top: 1px solid rgba(30, 35, 60, .1); margin: 0.8em 0; }

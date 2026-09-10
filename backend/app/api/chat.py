@@ -31,6 +31,7 @@ from ..engine.preprocess import normalize_question
 from ..engine.query_spec import (INTENT_LABELS, load_intent_dicts,
                                  spec_from_dict, spec_to_dict)
 from ..engine.soft_delete import inject_soft_delete
+from .chat_multi import try_handle_multi_query
 from ..executor import run_query, to_jsonable
 from ..engine.rate_limiter import RateLimitExceeded
 from ..llm import LLMClient, LLMError
@@ -401,6 +402,40 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
                         [d.name for d in spec.dimensions],
                         spec.time.expr or "", [f.field for f in spec.filters])
             yield _sse("spec", spec_to_dict(spec))
+
+            # ===== C11 多查询拆解：spec 完成后判断是否多查询，是则走多查询链路 =====
+            from ..models import Datasource as _DS
+            _ds = db.query(_DS).get(datasource_id)
+            _dialect = _ds.type if _ds else "mysql"
+            multi_events = try_handle_multi_query(
+                question=question, spec=spec, datasource_id=datasource_id,
+                workspace_id=ws_id, user_id=user.id, dialect=_dialect,
+                llm=llm, db=db, log=log, conv_id=conv_id,
+                history=_load_history(db, conv_id),
+                sse=_sse, run_query_cached=_run_query_cached,
+                inject_soft_delete=inject_soft_delete,
+            )
+            if multi_events is not None:
+                # 从 multi_spec 事件中提取子查询数
+                _sub_count = 0
+                for _evt in multi_events:
+                    if "event: multi_spec" in _evt:
+                        import json as _json
+                        for _line in _evt.split("\n"):
+                            if _line.startswith("data:"):
+                                try:
+                                    _d = _json.loads(_line[5:])
+                                    _sub_count = len(_d.get("sub_queries", []))
+                                except Exception:
+                                    pass
+                                break
+                        break
+                logger.info("[问数][%s][multi_query] 走多查询链路，子查询数=%d，推送事件数=%d",
+                            log.id, _sub_count, len(multi_events))
+                for _evt in multi_events:
+                    yield _evt
+                return
+
             yield _sse("progress", {"stage": "map",
                                     "msg": f"意图：{INTENT_LABELS.get(spec.intent, spec.intent)}"})
 
@@ -524,7 +559,7 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
                 for event in generate_sql_stream(datasource_id, ws_id, question,
                                                   history=history, llm=llm,
                                                   spec_context=spec_context,
-                                                  schema_name=body.schema_name or spec.schema):
+                                                  schema_name=body.schema_name or spec.schema_name):
                     if event["type"] == "stream":
                         yield _sse("stream", {"delta": event["delta"]})
                     elif event["type"] == "retry":
@@ -644,7 +679,7 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
                     for event in generate_sql_stream(datasource_id, ws_id, question,
                                                      history=history, llm=llm,
                                                      spec_context=spec_context,
-                                                     schema_name=body.schema_name or spec.schema,
+                                                     schema_name=body.schema_name or spec.schema_name,
                                                      exec_error=str(exc)):
                         if event["type"] == "result":
                             result2 = event["result"]
@@ -776,7 +811,7 @@ def chat(body: ChatIn, db: Session = Depends(get_db), user=Depends(get_current_u
             trace = {
                 "intent": spec.intent,
                 "spec": spec_to_dict(spec),
-                "schema": spec.schema or "",
+                "schema": spec.schema_name or "",
                 "mapping": _mapping_out,
                 "sql": exec_result["sql"],
                 "permission": exec_result["permission"],

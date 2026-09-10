@@ -1233,7 +1233,8 @@ def generate_sql_stream(datasource_id: int, workspace_id: int, question: str,
                         retries: int | None = None,
                         spec_context: dict | None = None,
                         schema_name: str | None = None,
-                        exec_error: str | None = None):
+                        exec_error: str | None = None,
+                        table_hints: list[str] | None = None):
     """流式生成 SQL；yield 事件：
     - {"type": "stream", "delta": "..."}  LLM 输出逐块（打字机效果）
     - {"type": "retry", "msg": "..."}     校验失败正在重试
@@ -1242,7 +1243,7 @@ def generate_sql_stream(datasource_id: int, workspace_id: int, question: str,
     spec_context：AI 问数重构后由意图层传入 {"spec": {...}, "mapping": {...}, "plan": {...}}，
     LLM 退化为"翻译器"，只能按结构化参数生成 SQL（模板无法覆盖时的兜底路径）；
     detail 意图且未指定指标/字段时放宽为"从可用表与字段中按问题检索展示字段"。
-    schema_name：查询范围 schema（项目/库），未显式传入时取 spec_context.spec.schema。"""
+    schema_name：查询范围 schema（项目/库），未显式传入时取 spec_context.spec.schema_name。"""
     from collections.abc import Generator
     db = SessionLocal()
     try:
@@ -1254,7 +1255,8 @@ def generate_sql_stream(datasource_id: int, workspace_id: int, question: str,
         if not schema_name and spec_context:
             schema_name = (spec_context.get("spec") or {}).get("schema") or None
         # 拆表检索词：问题重构提取（table_hints），用于选表阶段表名/表注释预筛
-        _hints = ((spec_context or {}).get("spec") or {}).get("table_hints") or []
+        # 优先级：外部显式传入 > spec_context 内置
+        _hints = table_hints or ((spec_context or {}).get("spec") or {}).get("table_hints") or []
         _spec_d = (spec_context or {}).get("spec") or {}
         _target = []
         for _m in (_spec_d.get("metrics") or []) + (_spec_d.get("dimensions") or []):

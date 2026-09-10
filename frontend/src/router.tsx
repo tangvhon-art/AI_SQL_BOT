@@ -21,6 +21,9 @@ import LineagePage from './pages/LineagePage'
 import ScenesPage from './pages/ScenesPage'
 import CachePage from './pages/CachePage'
 import SysConfigPage from './pages/SysConfigPage'
+import PromptPage from './pages/PromptPage'
+import ReportCenterPage from './pages/ReportCenterPage'
+import InsightPage from './pages/InsightPage'
 import { TOKEN_KEY } from './api/client'
 import { glassTheme } from './ui'
 
@@ -47,6 +50,9 @@ function Shell() {
           <Route path="/scenes" element={<ScenesPage />} />
           <Route path="/cache" element={<CachePage />} />
           <Route path="/sys-config" element={<SysConfigPage />} />
+          <Route path="/prompts" element={<PromptPage />} />
+          <Route path="/reports" element={<ReportCenterPage />} />
+          <Route path="/insight" element={<InsightPage />} />
           <Route path="/audit" element={<AuditPage />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />
         </Route>

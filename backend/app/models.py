@@ -306,6 +306,7 @@ class QueryLog(Base, AuditMixin):
     candidates_json = Column(JSON, default=list, comment="多候选评分与选中顺序")
     scene_code = Column(String(32), default="", comment="命中的场景编码")
     row_rule_summary = Column(String(256), default="", comment="行级注入摘要")
+    multi_query_json = Column(JSON, default=dict, comment="多查询拆解结果（C11）")
 
 
 # ---------- 结果复用与定时任务 ----------
@@ -525,3 +526,67 @@ class SceneDef(Base, AuditMixin):
     report_template = Column(Text, default="", comment="报告模板（auto_report用）")
     enabled = Column(Boolean, default=True, comment="是否启用")
     sort_order = Column(Integer, default=0, comment="排序值")
+
+
+# ---------- 报告管理（多查询+AI解读） ----------
+class Report(Base, AuditMixin):
+    """问数报告：保存完整的 Dashboard + AI 解读快照。"""
+    __tablename__ = "report"
+    __table_args__ = {"comment": "问数报告表"}
+    workspace_id = Column(BigInteger, nullable=False, comment="工作空间ID")
+    title = Column(String(200), nullable=False, comment="报告标题")
+    original_question = Column(Text, default="", comment="原始问题")
+    multi_query_spec = Column(JSON, default=dict, comment="多查询拆解结果快照")
+    dashboard_data = Column(JSON, default=dict, comment="Dashboard布局+卡片数据快照")
+    ai_interpretation = Column(JSON, default=dict, comment="AI解读结构化结果")
+    interpretation_text = Column(Text, default="", comment="解读纯文本（搜索/复制/导出用）")
+    remark = Column(Text, default="", comment="用户备注")
+    created_by = Column(BigInteger, default=0, comment="创建人ID")
+
+
+# ---------- 公共 Prompt 管理 ----------
+class Prompt(Base, AuditMixin):
+    """公共 Prompt 模板：多场景（AI解读/洞察草案/SQL生成等）。"""
+    __tablename__ = "prompt"
+    __table_args__ = {"comment": "公共Prompt模板表"}
+    workspace_id = Column(BigInteger, nullable=False, comment="工作空间ID")
+    scene_type = Column(String(50), nullable=False, default="ai_interpret",
+                        comment="使用场景：ai_interpret/insight_draft/sql_generation/custom")
+    name = Column(String(100), nullable=False, comment="模板名称")
+    description = Column(String(500), default="", comment="描述")
+    scene_tags = Column(String(200), default="", comment="业务标签（逗号分隔）")
+    prompt_template = Column(Text, nullable=False, comment="Prompt正文（支持{{变量}}）")
+    output_format = Column(String(20), default="structured_json", comment="输出格式")
+    is_default = Column(Boolean, default=False, comment="是否该场景默认")
+    is_builtin = Column(Boolean, default=False, comment="是否系统内置（不可编辑/删除）")
+    sort_order = Column(Integer, default=0, comment="排序值")
+    created_by = Column(BigInteger, default=0, comment="创建人ID")
+
+
+# ---------- 洞察分析 ----------
+class InsightTemplate(Base, AuditMixin):
+    """洞察配置模板：保存分析项配置，可重复生成报告。"""
+    __tablename__ = "insight_template"
+    __table_args__ = {"comment": "洞察配置模板表"}
+    workspace_id = Column(BigInteger, nullable=False, comment="工作空间ID")
+    name = Column(String(200), nullable=False, comment="模板名称")
+    description = Column(Text, default="", comment="描述")
+    purpose = Column(Text, default="", comment="分析目的（原始自然语言）")
+    datasource_id = Column(BigInteger, nullable=False, comment="数据源ID")
+    config = Column(JSON, default=dict, comment="InsightConfig完整配置（分析项列表）")
+    prompt_template_id = Column(BigInteger, nullable=True, comment="AI解读使用的Prompt模板ID")
+    created_by = Column(BigInteger, default=0, comment="创建人ID")
+
+
+class InsightReport(Base, AuditMixin):
+    """洞察生成的报告：关联模板+配置快照，写入report表统一管理。"""
+    __tablename__ = "insight_report"
+    __table_args__ = {"comment": "洞察报告表"}
+    workspace_id = Column(BigInteger, nullable=False, comment="工作空间ID")
+    template_id = Column(BigInteger, nullable=True, comment="来源模板ID")
+    report_id = Column(BigInteger, nullable=True, comment="关联report表ID（统一报告中心）")
+    name = Column(String(200), default="", comment="报告名称")
+    config_snapshot = Column(JSON, default=dict, comment="生成时的配置快照")
+    params = Column(JSON, default=dict, comment="生成时的参数（时间范围等）")
+    status = Column(String(20), default="generating", comment="状态：generating/success/failed")
+    created_by = Column(BigInteger, default=0, comment="创建人ID")

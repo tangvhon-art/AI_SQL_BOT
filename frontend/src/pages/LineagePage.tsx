@@ -81,7 +81,7 @@ export default function LineagePage() {
           color: '#666',
         },
         lineStyle: {
-          color: e.source_type === 'view_ddl' ? '#722ed1' : e.source_type === 'manual' ? '#fa8c16' : '#1677ff',
+          color: e.source_type === 'view_ddl' ? '#A78BFA' : e.source_type === 'manual' ? '#F97316' : '#6C5CE7',
           width: e.source_type === 'view_ddl' ? 2.5 : 1.5,
           curveness: 0.12,
           opacity: 0.7,
@@ -111,7 +111,7 @@ export default function LineagePage() {
           value: n.value || '',
           source: n.source || '',
           symbolSize: n.category === 0 ? 56 : 40,
-          itemStyle: n.category === 0 ? { color: '#1677ff', borderWidth: 2, borderColor: '#91caff' } : undefined,
+          itemStyle: n.category === 0 ? { color: '#6C5CE7', borderWidth: 2, borderColor: '#C4B5FD' } : undefined,
           label: { show: true, fontSize: 11, fontWeight: n.category === 0 ? 700 : 500 },
         })),
         links,

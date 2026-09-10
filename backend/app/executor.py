@@ -149,11 +149,20 @@ def run_query(datasource_id: int, sql: str, user_id: int,
 
 
 def to_jsonable(rows: list[list[Any]]) -> list[list[Any]]:
+    from decimal import Decimal
     out = []
     for row in rows:
-        out.append([
-            item.isoformat() if hasattr(item, "isoformat") else
-            (float(item) if isinstance(item, int) and abs(item) > 2 ** 53 else item)
-            for item in row
-        ])
+        converted = []
+        for item in row:
+            if item is None:
+                converted.append(None)
+            elif hasattr(item, "isoformat"):
+                converted.append(item.isoformat())
+            elif isinstance(item, Decimal):
+                converted.append(float(item))
+            elif isinstance(item, int) and abs(item) > 2 ** 53:
+                converted.append(float(item))
+            else:
+                converted.append(item)
+        out.append(converted)
     return out

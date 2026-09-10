@@ -27,6 +27,17 @@ export interface SSEHandlers {
   // 文件问答
   onAnswer?: (delta: string) => void
   onReferences?: (references: Array<Record<string, unknown>>) => void
+  // 多查询（C11）
+  onMultiSpec?: (payload: Record<string, unknown>) => void
+  onSubSql?: (payload: Record<string, unknown>) => void
+  onSubResult?: (payload: Record<string, unknown>) => void
+  onSubError?: (payload: Record<string, unknown>) => void
+  onDashboard?: (payload: Record<string, unknown>) => void
+  // AI 解读
+  onAiInterpretationStart?: (payload: Record<string, unknown>) => void
+  onAiInterpretation?: (payload: Record<string, unknown>) => void
+  onAiInterpretationDone?: (payload: Record<string, unknown>) => void
+  onAiInterpretationError?: (payload: Record<string, unknown>) => void
 }
 
 export async function postChatStream(
@@ -88,6 +99,17 @@ export async function postChatStream(
       case 'thinking': handlers.onThinking?.(String(payload.delta ?? '')); break
       case 'answer': handlers.onAnswer?.(String(payload.delta ?? '')); break
       case 'references': handlers.onReferences?.(payload.references as never); break
+      // 多查询
+      case 'multi_spec': handlers.onMultiSpec?.(payload); break
+      case 'sub_sql': handlers.onSubSql?.(payload); break
+      case 'sub_result': handlers.onSubResult?.(payload); break
+      case 'sub_error': handlers.onSubError?.(payload); break
+      case 'dashboard': handlers.onDashboard?.(payload); break
+      // AI 解读
+      case 'ai_interpretation_start': handlers.onAiInterpretationStart?.(payload); break
+      case 'ai_interpretation': handlers.onAiInterpretation?.(payload); break
+      case 'ai_interpretation_done': handlers.onAiInterpretationDone?.(payload); break
+      case 'ai_interpretation_error': handlers.onAiInterpretationError?.(payload); break
     }
   }
   while (true) {

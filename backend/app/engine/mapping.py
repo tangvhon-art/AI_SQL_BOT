@@ -180,7 +180,7 @@ def map_spec_to_schema(spec: Any, datasource_id: int, user_id: int,
     任一关键映射失败抛 MappingError（友好提示）。
     tables: 用户已确认的查询表（表澄清确认轮传入），映射候选限定在这些表内。
     """
-    # schema（项目/库）限定候选范围：优先 spec.schema，其次问题提取
+    # schema（项目/库）限定候选范围：优先 spec.schema_name，其次问题提取
     schema_name = getattr(spec, "schema", "") or None
     candidates = fetch_schema_candidates(datasource_id, schema_name, tables)
     db = SessionLocal()

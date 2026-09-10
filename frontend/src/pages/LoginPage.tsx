@@ -30,10 +30,10 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
         <div style={{ textAlign: 'center', marginBottom: 8 }}>
           <div style={{
             width: 52, height: 52, borderRadius: 16, margin: '0 auto 12px',
-            background: 'linear-gradient(135deg,#1677ff,#69b1ff)',
+            background: 'linear-gradient(135deg,#6C5CE7 0%,#A78BFA 100%)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             color: '#fff', fontWeight: 700, fontSize: 24,
-            boxShadow: '0 10px 30px rgba(22,119,255,.4)',
+            boxShadow: '0 10px 30px rgba(108,92,231,.4)',
           }}>
             Q
           </div>

@@ -1,5 +1,6 @@
-// 应用壳：玻璃拟态（Glass）+ Ant Design Pro v6 风格（暗色侧栏 + 白色页头 + 灰底内容区）
-// 菜单为多级：AI 问数 / 数据管理（数据源、知识库）/ 系统管理（角色、用户组、用户、权限、模型、审计）/ 结果复用
+// 应用壳：海外版后台管理风格（参考 QueryAI · 数据控制台）
+// 白色侧栏 + 白底顶栏 + 浅灰内容区；紫靛蓝主色 #6C5CE7 + 橙色伙伴色 #F97316
+// 菜单为多级：AI 问数 / 数据管理（数据源、知识库）/ 系统管理（角色、用户组、用户、权限、模型、审计）/ 能力增强
 import { useEffect, useState } from 'react'
 import { Avatar, Breadcrumb, Dropdown, Layout, Menu, Space, Tag, Typography } from 'antd'
 import {
@@ -32,6 +33,7 @@ const MENU: MenuProps['items'] = [
       { key: '/users', icon: <UserOutlined />, label: '用户管理' },
       { key: '/permissions', icon: <SafetyCertificateOutlined />, label: '权限控制' },
       { key: '/models', icon: <RobotOutlined />, label: '模型配置' },
+      { key: '/prompts', icon: <FileTextOutlined />, label: 'Prompt管理' },
       { key: '/audit', icon: <AuditOutlined />, label: '审计日志' },
     ],
   },
@@ -43,6 +45,8 @@ const MENU: MenuProps['items'] = [
       { key: '/scenes', icon: <AppstoreOutlined />, label: '场景模板' },
       { key: '/cache', icon: <ThunderboltOutlined />, label: '缓存管理' },
       { key: '/sys-config', icon: <ControlOutlined />, label: '系统配置' },
+      { key: '/reports', icon: <FileTextOutlined />, label: '报告中心' },
+      { key: '/insight', icon: <ThunderboltOutlined />, label: '洞察分析' },
     ],
   },
   { key: '/saved', icon: <ScheduleOutlined />, label: '定时任务' },
@@ -75,6 +79,14 @@ export default function App() {
   const seg = '/' + (loc.pathname.split('/')[1] ?? 'chat')
   const selected = loc.pathname.startsWith('/datasources/') ? '/datasources/:id/schema' : seg
   const crumb = CRUMB_MAP[selected] ?? CRUMB_MAP['/chat']
+  // 当前路由所属的分组：子页面加载时自动展开对应父级菜单
+  const parentOf = (s: string): string | undefined => {
+    if (['/datasources', '/datasources/:id/schema', '/knowledge'].includes(s)) return 'data'
+    if (['/roles', '/groups', '/users', '/permissions', '/models', '/prompts', '/audit'].includes(s)) return 'sys'
+    if (['/eval', '/lineage', '/scenes', '/cache', '/sys-config', '/reports', '/insight'].includes(s)) return 'cap'
+    return undefined
+  }
+  const defaultOpen = parentOf(selected)
 
   useEffect(() => {
     client.get<{ user: UserInfo }>('/auth/me').then((r) => setMe(r.data.user)).catch(() => {})
@@ -92,37 +104,37 @@ export default function App() {
         collapsible
         collapsed={collapsed}
         onCollapse={setCollapsed}
-        theme="dark"
+        theme="light"
         width={232}
         className="glass-sider"
         style={{ position: 'sticky', top: 0, height: '100vh' }}
       >
         <div style={{ height: 56, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
           <div style={{
-            width: 30, height: 30, borderRadius: 10, background: 'linear-gradient(135deg,#1677ff,#69b1ff)',
+            width: 30, height: 30, borderRadius: 10, background: 'linear-gradient(135deg,#6C5CE7 0%,#A78BFA 100%)',
             display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: 15,
-            boxShadow: '0 6px 16px rgba(22,119,255,.45)',
+            boxShadow: '0 4px 12px rgba(108,92,231,.35)',
           }}>
             Q
           </div>
           {!collapsed && (
             <div>
-              <Typography.Text strong style={{ color: '#fff', fontSize: 15, display: 'block', lineHeight: 1.2 }}>
+              <Typography.Text strong style={{ color: '#1A1D29', fontSize: 15, display: 'block', lineHeight: 1.2 }}>
                 AI 问数系统
               </Typography.Text>
-              <Typography.Text style={{ color: 'rgba(255,255,255,.55)', fontSize: 10, lineHeight: 1 }}>
-                React 19 · AntD v6 · Glass
+              <Typography.Text style={{ color: '#8B90A0', fontSize: 10, lineHeight: 1 }}>
+                React 19 · AntD v6 · QueryAI
               </Typography.Text>
             </div>
           )}
         </div>
         <div style={{ height: 'calc(100vh - 104px)', overflowY: 'auto', overflowX: 'hidden' }}>
         <Menu
-          theme="dark"
+          theme="light"
           mode="inline"
           selectedKeys={[selected]}
           items={MENU}
-          defaultOpenKeys={[]}
+          defaultOpenKeys={defaultOpen ? [defaultOpen] : []}
           onClick={(e) => nav(e.key)}
           style={{ borderInlineEnd: 'none', marginTop: 8, background: 'transparent' }}
         />
@@ -136,7 +148,12 @@ export default function App() {
         }}>
           <Breadcrumb items={[{ title: 'AI 问数' }, { title: crumb.title }]} style={{ fontSize: 13 }} />
           <Space size={16}>
-            <Tag color="blue" style={{ marginRight: 0, borderRadius: 6 }}>元数据库已连接</Tag>
+            <Tag style={{
+              marginRight: 0, borderRadius: 999, paddingInline: 10,
+              background: 'rgba(108,92,231,.10)', color: '#6C5CE7', border: '1px solid rgba(108,92,231,.20)', fontWeight: 500,
+            }}>
+              元数据库已连接
+            </Tag>
             <Dropdown
               menu={{
                 items: [{ key: 'logout', icon: <LogoutOutlined />, label: '退出登录' }],
@@ -144,10 +161,12 @@ export default function App() {
               }}
             >
               <Space style={{ cursor: 'pointer' }}>
-                <Avatar size={30} style={{ background: 'linear-gradient(135deg,#1677ff,#69b1ff)' }} icon={<UserOutlined />} />
-                <span style={{ fontSize: 13 }}>{me?.display_name || me?.username || 'admin'}</span>
-                <Tag style={{ borderRadius: 6, marginRight: 0 }}>{me?.role_code || 'admin'}</Tag>
-                <DownOutlined style={{ fontSize: 10, color: 'rgba(0,0,0,.45)' }} />
+                <Avatar size={30} style={{ background: 'linear-gradient(135deg,#6C5CE7,#A78BFA)' }} icon={<UserOutlined />} />
+                <span style={{ fontSize: 13, color: '#3D4252' }}>{me?.display_name || me?.username || 'admin'}</span>
+                <Tag style={{ borderRadius: 999, marginRight: 0, background: '#F8F9FB', border: '1px solid rgba(30,35,60,.08)', color: '#8B90A0' }}>
+                  {me?.role_code || 'admin'}
+                </Tag>
+                <DownOutlined style={{ fontSize: 10, color: '#8B90A0' }} />
               </Space>
             </Dropdown>
           </Space>

@@ -21,6 +21,10 @@ class EvalCaseIn(BaseModel):
     expect_sql: str = ""
     scene_code: str = ""
     tags: str = ""
+    eval_mode: str = "sql_only"
+    expect_sub_query_count: int | None = None
+    expect_chart_type: str | None = None
+    expect_interpretation_points: list[str] = []
 
 
 class EvalRunIn(BaseModel):
@@ -28,6 +32,9 @@ class EvalRunIn(BaseModel):
     case_ids: list[int] = []
     tags: list[str] = []
     mock_execute: bool | None = None  # None=取配置默认
+    eval_mode: str = "sql_only"
+    prompt_template_ids: list[int] = []
+    total_timeout_ms: int = 60000
 
 
 def _case_out(c: EvalCase) -> dict:
@@ -36,7 +43,11 @@ def _case_out(c: EvalCase) -> dict:
             "expect_metrics": c.expect_metrics_json or [],
             "expect_filters": c.expect_filters_json or [],
             "expect_sql": c.expect_sql, "scene_code": c.scene_code,
-            "tags": c.tags, "status": c.status}
+            "tags": c.tags, "status": c.status,
+            "eval_mode": getattr(c, "eval_mode", "sql_only"),
+            "expect_sub_query_count": getattr(c, "expect_sub_query_count", None),
+            "expect_chart_type": getattr(c, "expect_chart_type", None),
+            "expect_interpretation_points": getattr(c, "expect_interpretation_points", []) or []}
 
 
 # ---------- 用例 ----------
@@ -72,7 +83,11 @@ def create_case(body: EvalCaseIn, db: Session = Depends(get_db),
                  expect_metrics_json=body.expect_metrics,
                  expect_filters_json=body.expect_filters,
                  expect_sql=body.expect_sql, scene_code=body.scene_code,
-                 tags=body.tags, created_by=user.id)
+                 tags=body.tags, created_by=user.id,
+                 eval_mode=body.eval_mode,
+                 expect_sub_query_count=body.expect_sub_query_count,
+                 expect_chart_type=body.expect_chart_type,
+                 expect_interpretation_points=body.expect_interpretation_points)
     db.add(c)
     db.commit()
     db.refresh(c)
@@ -134,7 +149,10 @@ def create_run(body: EvalRunIn, db: Session = Depends(get_db),
         else get_settings().eval_mock_execute
     run = EvalRun(workspace_id=user.workspace_id, name=body.name or "评测批次",
                   scope_json={"case_ids": body.case_ids, "tags": body.tags},
-                  status="pending", mock_execute=mock, created_by=user.id)
+                  status="pending", mock_execute=mock, created_by=user.id,
+                  eval_mode=body.eval_mode,
+                  prompt_template_ids=body.prompt_template_ids,
+                  total_timeout_ms=body.total_timeout_ms)
     db.add(run)
     db.commit()
     db.refresh(run)
@@ -167,4 +185,12 @@ def get_run(run_id: int, db: Session = Depends(get_db),
     return {"id": run.id, "name": run.name, "status": run.status,
             "total": run.total, "metrics": run.metrics_json or {},
             "started_at": run.started_at, "finished_at": run.finished_at,
-            "mock_execute": run.mock_execute, "results": items}
+            "mock_execute": run.mock_execute, "eval_mode": getattr(run, "eval_mode", "sql_only"),
+            "results": items}
+
+
+@router.get("/modes")
+def list_eval_modes():
+    """列出支持的评测模式。"""
+    from ..engine.evaluator import ALL_EVAL_MODES
+    return {"ok": True, "items": [{"value": v, "label": l} for v, l in ALL_EVAL_MODES]}

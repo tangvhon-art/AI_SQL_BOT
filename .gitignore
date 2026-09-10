@@ -10,3 +10,5 @@ frontend/dist/
 .DS_Store
 /logs/
 /backend/scripts/
+/ui-design-runs/
+/style.json

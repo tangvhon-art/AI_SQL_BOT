@@ -333,6 +333,35 @@ export default function ChatPage() {
           onError: (p) => {
             update({ content_type: 'error', content: { msg: p.msg } as never })
           },
+          // 多查询（C11）
+          onMultiSpec: (p) => {
+            update({ content_type: 'result', content: { multi_spec: p } as never })
+          },
+          onSubSql: (p) => {
+            update({ content_type: 'result', content: { sub_sql: p } as never })
+          },
+          onSubResult: (p) => {
+            update({ content_type: 'result', content: { sub_result: p } as never })
+          },
+          onSubError: (p) => {
+            update({ content_type: 'result', content: { sub_error: p } as never })
+          },
+          onDashboard: (p) => {
+            update({ content_type: 'result', content: { dashboard: p, mode: 'dashboard' } as never })
+          },
+          // AI 解读
+          onAiInterpretationStart: (p) => {
+            update({ content_type: 'result', content: { ai_interpretation_loading: true, ai_interpretation: p } as never })
+          },
+          onAiInterpretation: (p) => {
+            update({ content_type: 'result', content: { ai_interpretation: p, ai_interpretation_loading: false } as never })
+          },
+          onAiInterpretationDone: (p) => {
+            update({ content_type: 'result', content: { ai_interpretation_done: p, ai_interpretation_loading: false } as never })
+          },
+          onAiInterpretationError: (p) => {
+            update({ content_type: 'result', content: { ai_interpretation_error: p, ai_interpretation_loading: false } as never })
+          },
           onDone: () => {
             setStreaming(false)
             setStage('')
@@ -415,11 +444,11 @@ export default function ChatPage() {
       <div className="glass-chat-input" style={{
         maxWidth: CHAT_MAX_W, margin: '0 auto',
         display: 'flex', flexDirection: 'column',
-        background: '#f5f5f7',
-        border: 'none',
+        background: '#ffffff',
+        border: '1px solid rgba(30,35,60,.08)',
         borderRadius: 24,
         padding: '14px 16px 10px 20px',
-        boxShadow: 'none',
+        boxShadow: '0 1px 2px rgba(15,35,34,.04), 0 6px 16px -4px rgba(15,35,34,.06), 0 20px 40px -16px rgba(15,35,34,.10)',
       }}>
         {/* 附件 chip 列表 */}
         {docFiles.length > 0 && (
@@ -563,10 +592,10 @@ export default function ChatPage() {
     <div style={{ textAlign: 'center', color: 'rgba(0,0,0,.45)' }}>
       <div style={{
         width: 60, height: 60, borderRadius: 18, margin: '0 auto 18px',
-        background: 'linear-gradient(135deg,#1677ff,#69b1ff)',
+        background: 'linear-gradient(135deg,#6C5CE7 0%,#A78BFA 100%)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         color: '#fff', fontSize: 28, fontWeight: 700,
-        boxShadow: '0 12px 32px rgba(22,119,255,.35)',
+        boxShadow: '0 12px 32px rgba(108,92,231,.35)',
       }}>
         Q
       </div>
@@ -652,8 +681,8 @@ export default function ChatPage() {
                 borderRadius: 10,
                 padding: '10px 12px',
                 marginBottom: 4,
-                background: currentConvId === c.id ? 'rgba(22,119,255,.1)' : undefined,
-                border: currentConvId === c.id ? '1px solid rgba(22,119,255,.3)' : '1px solid transparent',
+                background: currentConvId === c.id ? 'rgba(108,92,231,.08)' : undefined,
+                border: currentConvId === c.id ? '1px solid rgba(108,92,231,.3)' : '1px solid transparent',
               }}
             >
               <div style={{ width: '100%', overflow: 'hidden' }}>

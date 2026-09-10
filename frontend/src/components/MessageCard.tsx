@@ -7,6 +7,27 @@ import remarkGfm from 'remark-gfm'
 import type { ChatMsg } from '../types'
 import ChartCard from './ChartCard'
 import SqlBlock from './SqlBlock'
+import { Dashboard, convertDashboardEvent } from './dashboard/Dashboard'
+import { AiInterpretation } from './dashboard/AiInterpretation'
+import type { InterpretationResult } from '../types/chart'
+
+// Dashboard + AI 解读组合块
+function DashboardBlock({ dashboard, aiInterpretation, aiLoading }: {
+  dashboard: Record<string, unknown>
+  aiInterpretation?: Record<string, unknown>
+  aiLoading?: boolean
+}) {
+  const data = convertDashboardEvent(dashboard)
+  const interpretation = aiInterpretation as InterpretationResult | undefined
+  return (
+    <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <Dashboard data={data} showToolbar={false} />
+      {(interpretation || aiLoading) && (
+        <AiInterpretation result={interpretation} loading={aiLoading} rawText={interpretation?.rawText} />
+      )}
+    </div>
+  )
+}
 
 interface Props {
   msg: ChatMsg
@@ -134,7 +155,7 @@ function SummarySections({ sections }: { sections: Record<string, string> }) {
         <div style={{ fontSize: 13, color: 'rgba(0,0,0,.72)', lineHeight: 1.6 }}>{sections.change}</div>
       ) : null}
       {sections.highlight ? (
-        <div style={{ fontSize: 13, color: '#1677ff', lineHeight: 1.6 }}>{sections.highlight}</div>
+        <div style={{ fontSize: 13, color: '#6C5CE7', lineHeight: 1.6 }}>{sections.highlight}</div>
       ) : null}
       {sections.summary ? (
         <div style={{ fontSize: 13, color: 'rgba(0,0,0,.6)', lineHeight: 1.6 }}>{sections.summary}</div>
@@ -274,6 +295,20 @@ export default function MessageCard({ msg, onSaveQuery, onFeedback, onClarifyCon
     const anomalies = (c.anomalies ?? []) as Array<{ type: string; desc: string }>
     const querySpec = (c.query_spec ?? {}) as Record<string, unknown>
     const trace = (c.trace ?? {}) as Record<string, unknown>
+    // 多查询模式：已收到 multi_spec 但 dashboard 数据尚未到达 → 显示 loading，不提前渲染不完整内容
+    const isMultiQueryLoading = !!c.multi_spec && !c.dashboard && !c.sub_error
+    if (isMultiQueryLoading) {
+      return (
+        <div className="glass-msg-assistant" style={{ margin: '10px 0', padding: '20px 16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Spin size="small" />
+            <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+              正在生成多查询结果（拆解 → 生成 SQL → 执行 → 编排图表）…
+            </Typography.Text>
+          </div>
+        </div>
+      )
+    }
     return (
       <div
         className="glass-msg-assistant"
@@ -304,8 +339,8 @@ export default function MessageCard({ msg, onSaveQuery, onFeedback, onClarifyCon
             }]}
           />
         ) : null}
-        {/* "我理解的问题"：QuerySpec 结构化参数（可纠错） */}
-        <SpecCard spec={querySpec} />
+        {/* "我理解的问题"：QuerySpec 结构化参数（可纠错）—— 多查询模式下隐藏，避免与结果卡片混排 */}
+        {!c.dashboard && <SpecCard spec={querySpec} />}
         {/* 四层结论（确定性计算 + LLM 解读） */}
         {sections.result ? <SummarySections sections={sections} /> : c.text ? (
           <div style={{ marginBottom: 8 }}>
@@ -338,7 +373,7 @@ export default function MessageCard({ msg, onSaveQuery, onFeedback, onClarifyCon
                     return (
                       <div key={i} style={{
                         display: 'flex', gap: 8, alignItems: 'flex-start',
-                        padding: '6px 10px', background: '#fafafa', borderRadius: 8,
+                        padding: '6px 10px', background: '#F8F9FB', borderRadius: 8,
                       }}>
                         <span style={{ fontSize: 14, flexShrink: 0 }}>{isFile ? '📄' : '📚'}</span>
                         <div style={{ minWidth: 0, flex: 1 }}>
@@ -367,7 +402,15 @@ export default function MessageCard({ msg, onSaveQuery, onFeedback, onClarifyCon
           />
         ) : null}
         {chart.type === 'metric' || chart.option || chart.type === 'table' ? (
-          <ChartCard chart={chart as never} />
+          !c.dashboard ? <ChartCard chart={chart as never} /> : null
+        ) : null}
+        {/* 多查询 Dashboard 模式 */}
+        {c.dashboard ? (
+          <DashboardBlock
+            dashboard={c.dashboard as never}
+            aiInterpretation={c.ai_interpretation as never}
+            aiLoading={!!c.ai_interpretation_loading}
+          />
         ) : null}
         {c.sql ? <SqlBlock sql={String(c.sql)} permission={String(c.permission ?? '')} /> : null}
         {/* 口径与溯源 */}

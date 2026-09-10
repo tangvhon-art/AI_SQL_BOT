@@ -81,7 +81,7 @@ class ActionSpec(BaseModel):
 
 class QuerySpec(BaseModel):
     intent: str = "value"
-    schema: str = ""                 # 查询范围 schema（项目/库）；空 = 数据源默认
+    schema_name: str = ""            # 查询范围 schema（项目/库）；空 = 数据源默认
     metrics: list[MetricSpec] = Field(default_factory=list)
     dimensions: list[DimensionSpec] = Field(default_factory=list)
     filters: list[FilterSpec] = Field(default_factory=list)
@@ -361,3 +361,51 @@ def load_intent_templates(db, workspace_id: int) -> list[dict]:
             .order_by(IntentTemplate.priority.desc()).all())
     return [{"pattern": r.pattern, "intent": r.intent,
              "slot_map": r.slot_map or {}} for r in rows]
+
+
+# ---------- 多查询 Spec（C11 扩展） ----------
+class SubQuerySpec(BaseModel):
+    """单个子查询的结构化参数，字段与 QuerySpec 对齐，可通过 to_query_spec() 转换。"""
+    sub_id: str = ""                       # 子查询唯一标识 q1/q2/...
+    question: str = ""                     # 拆解后的自然语言
+    intent: str = "value"                  # value/compare/ranking/trend/detail/statistic
+    metrics: list[MetricSpec] = Field(default_factory=list)
+    dimensions: list[DimensionSpec] = Field(default_factory=list)
+    filters: list[FilterSpec] = Field(default_factory=list)
+    time: TimeSpec = Field(default_factory=TimeSpec)
+    action: ActionSpec = Field(default_factory=ActionSpec)
+    schema_name: str = ""
+    table_hints: list[str] = Field(default_factory=list)
+    chart_hint: str | None = None          # 推荐图表类型（推荐器填充）
+    title: str | None = None               # 卡片标题（LLM 生成）
+
+    def to_query_spec(self) -> QuerySpec:
+        """转换为旧版 QuerySpec，传入 generate_sql_stream。"""
+        return QuerySpec(
+            intent=self.intent,
+            schema_name=self.schema_name,
+            metrics=self.metrics,
+            dimensions=self.dimensions,
+            filters=self.filters,
+            time=self.time,
+            action=self.action,
+            original_question=self.question,
+            rewritten_question=self.question,
+            table_hints=self.table_hints,
+        )
+
+
+class MultiQuerySpec(BaseModel):
+    """多查询拆解结果：原始问题 + 子查询列表 + 布局提示。"""
+    original_question: str = ""
+    sub_queries: list[SubQuerySpec] = Field(default_factory=list)
+    layout_hint: str = "auto"             # auto/grid_2/grid_3/tabs/masonry
+    shared_dimension: str | None = None    # 共享维度（联动用）
+    source: str = "rule"                   # rule/llm/manual
+
+    def is_single(self) -> bool:
+        """是否单查询（长度=1 时走旧链路兼容）。"""
+        return len(self.sub_queries) <= 1
+
+    def to_dict(self) -> dict:
+        return self.model_dump(mode="json")

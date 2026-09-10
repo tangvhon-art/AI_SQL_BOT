@@ -317,8 +317,162 @@ def _migrate_meta_tables() -> None:
                 conn.exec_driver_sql(
                     "ALTER TABLE `eval_result` MODIFY COLUMN `sql_correct` "
                     "BOOLEAN NULL COMMENT 'SQL是否正确（NULL=未判定，需填写期望SQL）'")
+
+            # 13) query_log 多查询拆解结果（C11）
+            if name == "query_log":
+                if "multi_query_json" not in cols:
+                    conn.exec_driver_sql(
+                        f"ALTER TABLE `{name}` ADD COLUMN `multi_query_json` "
+                        "JSON NULL COMMENT '多查询拆解结果（C11）'")
+
+            # 14) eval_case 评测扩展字段（多查询/图表/解读评测）
+            if name == "eval_case":
+                for col_name, ddl in (
+                    ("eval_mode", "VARCHAR(20) NOT NULL DEFAULT 'sql_only' COMMENT '评测模式'"),
+                    ("expect_sub_query_count", "INT NULL COMMENT '期望子查询数量'"),
+                    ("expect_sub_queries", "JSON NULL COMMENT '期望子查询详情'"),
+                    ("expect_chart_type", "VARCHAR(20) NULL COMMENT '期望图表类型'"),
+                    ("expect_chart_types", "JSON NULL COMMENT '多查询期望图表类型列表'"),
+                    ("expect_interpretation_points", "JSON NULL COMMENT '期望解读关键点列表'"),
+                ):
+                    if col_name not in cols:
+                        conn.exec_driver_sql(f"ALTER TABLE `{name}` ADD COLUMN `{col_name}` {ddl}")
+
+            # 15) eval_result 评测扩展字段
+            if name == "eval_result":
+                for col_name, ddl in (
+                    ("decomposition_score", "FLOAT NOT NULL DEFAULT 0 COMMENT '拆解评分0-1'"),
+                    ("chart_correct", "BOOLEAN NOT NULL DEFAULT FALSE COMMENT '图表推荐是否正确'"),
+                    ("interpretation_coverage", "FLOAT NOT NULL DEFAULT 0 COMMENT '解读关键点覆盖率0-1'"),
+                    ("interpretation_score", "FLOAT NOT NULL DEFAULT 0 COMMENT '解读质量评分1-5'"),
+                    ("prompt_template_id", "BIGINT NULL COMMENT '使用的解读模板ID（A/B评测）'"),
+                ):
+                    if col_name not in cols:
+                        conn.exec_driver_sql(f"ALTER TABLE `{name}` ADD COLUMN `{col_name}` {ddl}")
+
+            # 16) eval_run 评测扩展字段
+            if name == "eval_run":
+                for col_name, ddl in (
+                    ("eval_mode", "VARCHAR(20) NOT NULL DEFAULT 'sql_only' COMMENT '批次评测模式'"),
+                    ("prompt_template_ids", "JSON NULL COMMENT 'A/B评测选择的模板ID列表'"),
+                    ("total_timeout_ms", "INT NOT NULL DEFAULT 60000 COMMENT '多查询整体超时毫秒'"),
+                ):
+                    if col_name not in cols:
+                        conn.exec_driver_sql(f"ALTER TABLE `{name}` ADD COLUMN `{col_name}` {ddl}")
         # 恢复外键检查
         conn.exec_driver_sql("SET FOREIGN_KEY_CHECKS = 1")
+
+
+def _seed_builtin_prompts() -> None:
+    """初始化内置 Prompt 模板（ai_interpret 场景），仅在无任何内置模板时插入。"""
+    from .models import Prompt
+    builtin = [
+        {
+            "name": "通用分析（默认）",
+            "description": "通用数据分析模板，平衡全面，适用于大多数场景",
+            "scene_tags": "通用",
+            "prompt_template": (
+                "你是一位资深数据分析师。请基于以下数据进行分析：\n"
+                "原始问题：{{question}}\n"
+                "数据摘要：{{data_summary}}\n"
+                "关键指标：{{metrics}}\n\n"
+                "请按以下结构输出分析结果（JSON）：\n"
+                '{"summary": "总体结论（1-3句）", '
+                '"key_metrics": [{"name":"指标名","value":"值","change":"变化"}], '
+                '"trends": ["趋势分析"], "comparisons": ["对比发现"], '
+                '"anomalies": [{"desc":"异常描述","severity":"high/medium/low"}], '
+                '"suggestions": ["行动建议（1-3条）"]}'
+            ),
+            "output_format": "structured_json",
+            "is_default": True,
+        },
+        {
+            "name": "经营分析",
+            "description": "适用于门店经营、销售、库存等经营场景，侧重原因推测和改进建议",
+            "scene_tags": "经营,销售,门店",
+            "prompt_template": (
+                "你是一位资深经营分析师。请基于以下经营数据进行分析：\n"
+                "原始问题：{{question}}\n"
+                "数据摘要：{{data_summary}}\n"
+                "关键指标：{{metrics}}\n\n"
+                "请从经营角度分析：①整体表现 ②亮点与不足 ③原因推测 ④改进建议\n"
+                "输出 JSON：{\"summary\":\"\", \"key_metrics\":[], \"trends\":[], "
+                "\"comparisons\":[], \"anomalies\":[], \"suggestions\":[]}"
+            ),
+            "output_format": "structured_json",
+            "is_default": False,
+        },
+        {
+            "name": "财务分析",
+            "description": "适用于财务、成本、利润等场景，严谨精确，侧重风险提示",
+            "scene_tags": "财务,成本,利润",
+            "prompt_template": (
+                "你是一位资深财务分析师。请基于以下财务数据进行严谨分析：\n"
+                "原始问题：{{question}}\n"
+                "数据摘要：{{data_summary}}\n"
+                "关键指标：{{metrics}}\n\n"
+                "请分析：①财务健康度 ②成本结构 ③盈利分析 ④风险提示\n"
+                "所有数字必须来自数据，不得编造。输出 JSON："
+                "{\"summary\":\"\", \"key_metrics\":[], \"trends\":[], "
+                "\"comparisons\":[], \"anomalies\":[], \"suggestions\":[]}"
+            ),
+            "output_format": "structured_json",
+            "is_default": False,
+        },
+        {
+            "name": "运营分析",
+            "description": "适用于运营、流程、效率等场景，侧重瓶颈识别和可操作建议",
+            "scene_tags": "运营,流程,效率",
+            "prompt_template": (
+                "你是一位资深运营分析师。请基于以下运营数据进行分析：\n"
+                "原始问题：{{question}}\n"
+                "数据摘要：{{data_summary}}\n"
+                "关键指标：{{metrics}}\n\n"
+                "请分析：①效率指标 ②瓶颈识别 ③流程优化方向 ④可执行建议\n"
+                "输出 JSON：{\"summary\":\"\", \"key_metrics\":[], \"trends\":[], "
+                "\"comparisons\":[], \"anomalies\":[], \"suggestions\":[]}"
+            ),
+            "output_format": "structured_json",
+            "is_default": False,
+        },
+        {
+            "name": "简洁摘要",
+            "description": "3句话核心结论+关键数字，适合快速汇报",
+            "scene_tags": "通用,汇报",
+            "prompt_template": (
+                "你是一位数据分析师。请基于以下数据给出简洁摘要：\n"
+                "原始问题：{{question}}\n"
+                "数据摘要：{{data_summary}}\n\n"
+                "要求：不超过3句话，包含最关键的数字和结论。\n"
+                "输出 JSON：{\"summary\":\"3句话核心结论\", \"key_metrics\":[前3个关键指标], "
+                "\"trends\":[], \"comparisons\":[], \"anomalies\":[], \"suggestions\":[]}"
+            ),
+            "output_format": "structured_json",
+            "is_default": False,
+        },
+    ]
+    try:
+        with SessionLocal() as db:
+            existing = db.query(Prompt).filter(Prompt.is_builtin.is_(True)).first()
+            if existing:
+                return
+            for i, item in enumerate(builtin):
+                db.add(Prompt(
+                    workspace_id=0,  # workspace_id=0 表示全局内置，查询时按 workspace_id IN (0, 当前ws)
+                    scene_type="ai_interpret",
+                    name=item["name"],
+                    description=item["description"],
+                    scene_tags=item["scene_tags"],
+                    prompt_template=item["prompt_template"],
+                    output_format=item["output_format"],
+                    is_default=item["is_default"],
+                    is_builtin=True,
+                    sort_order=i,
+                    created_by=0,
+                ))
+            db.commit()
+    except Exception:
+        pass  # 内置模板初始化失败不影响启动
 
 
 def init_db():
@@ -327,6 +481,7 @@ def init_db():
     _migrate_meta_tables()
     install_soft_delete_filter()
     _install_audit_events()
+    _seed_builtin_prompts()
 
 
 def get_db():

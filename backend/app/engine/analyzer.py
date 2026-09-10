@@ -157,8 +157,8 @@ def _clean_label(comment: str) -> str:
 def _qtable(t: str, spec: QuerySpec, dialect: str = "mysql") -> str:
     """表名限定：指定 schema（项目/库）且为 mysql 方言时输出 `schema`.`table`；
     否则输出裸表名（连接库即该 schema）。"""
-    if spec.schema and dialect == "mysql":
-        return f"`{spec.schema}`.`{t}`"
+    if spec.schema_name and dialect == "mysql":
+        return f"`{spec.schema_name}`.`{t}`"
     return f"`{t}`"
 
 
@@ -328,7 +328,7 @@ def build_analysis_sql(spec: QuerySpec, mapping: dict,
         raise AnalysisError(f"未知意图: {intent}")
     meta = {
         "intent": intent,
-        "schema": spec.schema,
+        "schema": spec.schema_name,
         "metric": mapping["metrics"][0] if mapping["metrics"] else None,
         "dimensions": [_clean_label(d["comment"] or d["column"]) for d in mapping["dimensions"]],
         "time": spec_to_time_meta(spec),

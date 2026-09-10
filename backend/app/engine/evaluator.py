@@ -235,3 +235,90 @@ def start_batch(run_id: int, llm) -> None:
         db.close()
     t = threading.Thread(target=_run_batch, args=(run_id, llm), daemon=True)
     t.start()
+
+# ========== 公共评测器扩展（多模式） ==========
+from typing import Any
+
+# 评测模式常量
+EVAL_MODE_SQL_ONLY = "sql_only"
+EVAL_MODE_MULTI_QUERY = "multi_query"
+EVAL_MODE_CHART = "chart"
+EVAL_MODE_INTERPRETATION = "interpretation"
+EVAL_MODE_E2E_FULL = "e2e_full"
+
+ALL_EVAL_MODES = [
+    (EVAL_MODE_SQL_ONLY, "SQL正确性"),
+    (EVAL_MODE_MULTI_QUERY, "多查询拆解"),
+    (EVAL_MODE_CHART, "图表推荐"),
+    (EVAL_MODE_INTERPRETATION, "AI解读"),
+    (EVAL_MODE_E2E_FULL, "端到端全链路"),
+]
+
+
+class BaseEvaluator:
+    """评测器公共接口。子类实现 evaluate 方法。"""
+    mode: str = "sql_only"
+
+    def evaluate(self, case: EvalCase, context: dict[str, Any]) -> dict[str, Any]:
+        raise NotImplementedError
+
+
+class MultiQueryEvaluator(BaseEvaluator):
+    mode = EVAL_MODE_MULTI_QUERY
+    def evaluate(self, case, context):
+        actual_count = context.get("sub_query_count", 0)
+        expected_count = getattr(case, "expect_sub_query_count", None) or 0
+        score = max(0, 1 - abs(actual_count - expected_count) / expected_count) if expected_count > 0 else (1.0 if actual_count <= 1 else 0.5)
+        return {"mode": self.mode, "decomposition_score": round(score, 2)}
+
+
+class ChartEvaluator(BaseEvaluator):
+    mode = EVAL_MODE_CHART
+    def evaluate(self, case, context):
+        actual_chart = context.get("chart_type", "")
+        expected_chart = getattr(case, "expect_chart_type", None) or ""
+        return {"mode": self.mode, "chart_correct": bool(expected_chart) and actual_chart == expected_chart}
+
+
+class InterpretationEvaluator(BaseEvaluator):
+    mode = EVAL_MODE_INTERPRETATION
+    def evaluate(self, case, context):
+        interpretation = context.get("interpretation", {})
+        expected_points = getattr(case, "expect_interpretation_points", None) or []
+        summary = (interpretation.get("summary") or "") + " " + " ".join(interpretation.get("trends") or [])
+        covered = sum(1 for p in expected_points if p.lower() in summary.lower())
+        coverage = covered / len(expected_points) if expected_points else 1.0
+        quality = 1 + bool(interpretation.get("summary")) + bool(interpretation.get("key_metrics")) + bool(interpretation.get("trends") or interpretation.get("comparisons")) + bool(interpretation.get("suggestions"))
+        return {"mode": self.mode, "interpretation_coverage": round(coverage, 2), "interpretation_score": quality}
+
+
+class E2eFullEvaluator(BaseEvaluator):
+    mode = EVAL_MODE_E2E_FULL
+    def evaluate(self, case, context):
+        return {"mode": self.mode,
+                "decomposition_score": MultiQueryEvaluator().evaluate(case, context).get("decomposition_score", 0),
+                "chart_correct": ChartEvaluator().evaluate(case, context).get("chart_correct", False),
+                "interpretation_coverage": InterpretationEvaluator().evaluate(case, context).get("interpretation_coverage", 0),
+                "interpretation_score": InterpretationEvaluator().evaluate(case, context).get("interpretation_score", 0)}
+
+
+class EvaluatorRegistry:
+    _registry: dict[str, BaseEvaluator] = {}
+
+    @classmethod
+    def register(cls, evaluator: BaseEvaluator) -> None:
+        cls._registry[evaluator.mode] = evaluator
+
+    @classmethod
+    def get(cls, mode: str) -> BaseEvaluator:
+        return cls._registry.get(mode, BaseEvaluator())
+
+    @classmethod
+    def list_modes(cls) -> list[tuple[str, str]]:
+        return ALL_EVAL_MODES
+
+
+EvaluatorRegistry.register(MultiQueryEvaluator())
+EvaluatorRegistry.register(ChartEvaluator())
+EvaluatorRegistry.register(InterpretationEvaluator())
+EvaluatorRegistry.register(E2eFullEvaluator())

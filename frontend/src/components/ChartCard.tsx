@@ -193,7 +193,7 @@ export default function ChartCard({ chart }: { chart: ChartPayload }) {
             expandIcon: ({ expanded, onExpand, record }) => (
               <span
                 onClick={(e) => { e.stopPropagation(); onExpand(record, e) }}
-                style={{ display: 'inline-block', width: 16, cursor: 'pointer', color: '#1677ff' }}
+                style={{ display: 'inline-block', width: 16, cursor: 'pointer', color: '#6C5CE7' }}
               >
                 {expanded ? '−' : '+'}
               </span>

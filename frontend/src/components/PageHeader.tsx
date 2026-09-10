@@ -20,11 +20,11 @@ export default function PageHeader({ title, description, extra, breadcrumb }: Pr
       ) : null}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <Typography.Title level={4} style={{ margin: 0, fontWeight: 600 }}>
+          <Typography.Title level={4} style={{ margin: 0, fontWeight: 700, fontSize: 24, letterSpacing: '-.02em', color: '#1A1D29' }}>
             {title}
           </Typography.Title>
           {description ? (
-            <Typography.Paragraph type="secondary" style={{ margin: '6px 0 0', fontSize: 13 }}>
+            <Typography.Paragraph type="secondary" style={{ margin: '6px 0 0', fontSize: 13, color: '#8B90A0' }}>
               {description}
             </Typography.Paragraph>
           ) : null}
