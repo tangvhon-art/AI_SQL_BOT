@@ -96,6 +96,7 @@ export default function MultiSpecPreview({
               <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
                 <Checkbox
                   checked={enabled}
+                  disabled={!!busy}
                   onChange={(e) => patch(q.sub_id, { enabled: e.target.checked })}
                   style={{ marginTop: 3 }}
                 />
@@ -180,6 +181,7 @@ export default function MultiSpecPreview({
                                 <Checkbox
                                   key={t.table}
                                   checked={checked}
+                                  disabled={!!busy}
                                   onChange={(e) => {
                                     const cur = q.confirmed_tables ?? []
                                     const next = e.target.checked
@@ -209,10 +211,10 @@ export default function MultiSpecPreview({
                 </div>
                 <Space size={2}>
                   <Tooltip title="编辑">
-                    <Button size="small" type="text" icon={<EditOutlined />} onClick={() => startEdit(q)} />
+                    <Button size="small" type="text" icon={<EditOutlined />} disabled={!!busy} onClick={() => startEdit(q)} />
                   </Tooltip>
                   <Tooltip title="删除">
-                    <Button size="small" type="text" danger icon={<DeleteOutlined />}
+                    <Button size="small" type="text" danger icon={<DeleteOutlined />} disabled={!!busy}
                       onClick={() => setItems((prev) => prev.filter((x) => x.sub_id !== q.sub_id))} />
                   </Tooltip>
                 </Space>
@@ -224,6 +226,7 @@ export default function MultiSpecPreview({
 
       <Space style={{ marginTop: 12 }} wrap size={8}>
         <Button size="small" icon={<PlusOutlined />}
+          disabled={!!busy}
           onClick={() => setItems((prev) => [...prev, {
             sub_id: `q${prev.length + 1}`, question: '', intent: 'value',
             metrics: [], dimensions: [], filters: [], time: {},
@@ -232,15 +235,15 @@ export default function MultiSpecPreview({
           新增子查询
         </Button>
         {onRegen ? (
-          <Button size="small" icon={<ReloadOutlined />} onClick={onRegen}>重新拆解</Button>
+          <Button size="small" icon={<ReloadOutlined />} disabled={!!busy} onClick={onRegen}>重新拆解</Button>
         ) : null}
         {onCancel ? (
-          <Button size="small" onClick={onCancel}>取消</Button>
+          <Button size="small" disabled={!!busy} onClick={onCancel}>取消</Button>
         ) : null}
         <Button
           type="primary" size="small"
           loading={confirming}
-          disabled={enabledCount === 0 || blockedCount > 0}
+          disabled={enabledCount === 0 || blockedCount > 0 || !!busy || !!confirming}
           onClick={() => onConfirm(items.filter((q) => q.enabled !== false))}
         >
           确认执行（{enabledCount}）

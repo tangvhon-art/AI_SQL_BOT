@@ -131,15 +131,23 @@ function buildPieOption(dataset: ChartDataset) {
   const dim = dataset.dimensions[0];
   return {
     color: COLORS,
-    tooltip: { trigger: 'item' },
-    legend: { orient: 'vertical', left: 'left' },
+    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+    legend: {
+      orient: 'horizontal',
+      bottom: 4,
+      left: 'center',
+      itemWidth: 12,
+      itemHeight: 12,
+      textStyle: { fontSize: 12, color: '#595959' },
+    },
     series: [{
       type: 'pie',
-      radius: ['40%', '70%'],
-      avoidLabelOverlap: false,
+      radius: ['26%', '45%'],
+      center: ['50%', '45%'],
+      avoidLabelOverlap: true,
       itemStyle: { borderRadius: 6, borderColor: '#fff', borderWidth: 2 },
       label: { show: false, position: 'center' },
-      emphasis: { label: { show: true, fontSize: 16, fontWeight: 'bold' } },
+      emphasis: { label: { show: true, fontSize: 14, fontWeight: 'bold' } },
       labelLine: { show: false },
       data: dataset.rows.map((r) => ({ name: String(r[dim]), value: Number(r[metric]) || 0 })),
     }],

@@ -51,6 +51,55 @@ def _apply_limit(sql: str, dialect: str, max_rows: int) -> str:
     return ast.sql(dialect=_DIALECT_MAP.get(dialect, dialect), pretty=True)
 
 
+def get_table_columns(datasource_id: int, table_name: str,
+                      schema_name: str | None = None) -> list[dict]:
+    """从数据源实时获取指定表的字段列表（列名/类型/注释）。
+
+    用于补充元数据、校验字段存在性、为 SQL 生成提供准确的表结构；
+    元数据缺失或过期时以此为准。查询失败返回空列表（不阻断主流程）。
+    """
+    from .models import Datasource
+    from .database import SessionLocal
+    from .security import aes_decrypt
+    from urllib.parse import quote_plus
+
+    db = SessionLocal()
+    try:
+        ds = db.query(Datasource).get(datasource_id)
+        if not ds:
+            return []
+        scheme = "postgresql+psycopg2" if ds.type == "postgresql" else "mysql+pymysql"
+        url = (f"{scheme}://{quote_plus(ds.user)}:{quote_plus(aes_decrypt(ds.password_enc))}"
+               f"@{ds.host}:{ds.port}/{ds.db_name}")
+        engine = create_engine(url, pool_pre_ping=True,
+                               connect_args={"connect_timeout": 5} if ds.type == "mysql" else {})
+        try:
+            with engine.connect() as conn:
+                if ds.type == "mysql":
+                    rows = conn.execute(text(
+                        "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_COMMENT "
+                        "FROM information_schema.columns "
+                        "WHERE TABLE_SCHEMA = :db AND TABLE_NAME = :tbl "
+                        "ORDER BY ORDINAL_POSITION"
+                    ), {"db": ds.db_name, "tbl": table_name}).fetchall()
+                else:
+                    rows = conn.execute(text(
+                        "SELECT column_name, data_type, "
+                        "coerce_to_text(col_description(("
+                        "table_schema||'.'||table_name)::regclass::oid, ordinal_position)) AS comment "
+                        "FROM information_schema.columns "
+                        "WHERE table_schema = :schema AND table_name = :tbl "
+                        "ORDER BY ordinal_position"
+                    ), {"schema": schema_name or "public", "tbl": table_name}).fetchall()
+                return [{"column_name": r[0], "data_type": r[1], "comment": (r[2] or "")} for r in rows]
+        finally:
+            engine.dispose()
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        db.close()
+
+
 def run_query(datasource_id: int, sql: str, user_id: int,
               dialect: str = "mysql") -> dict:
     """完整链路：语法校验 → 字段/行级权限改写 → 成本门槛 → 限流/超时 → 只读执行。

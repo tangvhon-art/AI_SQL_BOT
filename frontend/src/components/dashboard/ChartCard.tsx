@@ -95,21 +95,22 @@ export const ChartCard: React.FC<ChartCardProps> = ({ config, height = 300 }) =>
 
   // ECharts 渲染（rank 多指标时顶部提供指标切换）
   const showMetricSwitch = config.chartType === 'rank' && config.dataset.metrics.length > 1;
-  const chartHeight = showMetricSwitch ? height - 34 : height;
   return (
     <CardWrapper title={config.title} sql={config.sql} height={height}>
-      {showMetricSwitch && (
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4 }}>
-          <Select
-            size="small"
-            style={{ width: 110 }}
-            value={rankMetric ?? config.dataset.metrics[0]}
-            onChange={setRankMetric}
-            options={config.dataset.metrics.map((m) => ({ label: m, value: m }))}
-          />
-        </div>
-      )}
-      <div ref={containerRef} style={{ width: '100%', height: chartHeight }} />
+      <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+        {showMetricSwitch && (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4, flexShrink: 0 }}>
+            <Select
+              size="small"
+              style={{ width: 110 }}
+              value={rankMetric ?? config.dataset.metrics[0]}
+              onChange={setRankMetric}
+              options={config.dataset.metrics.map((m) => ({ label: m, value: m }))}
+            />
+          </div>
+        )}
+        <div ref={containerRef} style={{ width: '100%', flex: 1, minHeight: 0 }} />
+      </div>
     </CardWrapper>
   );
 };

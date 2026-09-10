@@ -144,7 +144,9 @@ LIMIT 分页参数;
 14. **子查询过滤必须用 IN**：按名称模糊匹配项目/实体再取其 ID 过滤时，禁止 `x = (SELECT id FROM ... WHERE name LIKE ...)`（可能返回多行报 1242），必须写 `x IN (SELECT id FROM ... WHERE name LIKE ...)`
 15. **禁止对 ID/外键类字段做聚合**：id、*_id 结尾字段（主键/外键，如 project_id、req_id、api_id）只用于关联、过滤、分组，**禁止** SUM/AVG/MAX/MIN(project_id) 这类无意义聚合；聚合函数只允许作用于数值业务指标（金额/数量/时长/次数/比率/大小等）。「按X项目」「查X项目/项目下的Y」是维度筛选（WHERE 项目名 LIKE + GROUP BY 项目名/名称列），不是对项目ID求和
 16. **不得自行脑补过滤条件**：WHERE / HAVING 条件必须严格来自用户问题中**明确声明**的筛选要求（如"状态=已通过"、"近7日"、"项目名包含X"等）；**禁止**自行添加用户未提及的过滤条件（如 `status = 1`、`is_active = 1`、`type = 'xxx'`、部门/人员限制等），即使字段注释暗示了业务含义或"看起来应该过滤"。若用户问题未提及某字段，则该字段不得出现在 WHERE / HAVING 中（软删 `is_deleted = 0` 按规则 7 自动处理，不在此限）；时间范围仅在用户明确提及时添加（如"近7日"、"今天"、"9月"）
-17. **多子查询时间口径必须一致**：同一问题拆出的多个子查询，时间字段必须统一，禁止混用不同时间字段（如一个用开始时间、另一个用创建时间）导致口径不一致；按日期分组时也要用同一时间字段做 DATE_FORMAT"""
+17. **多子查询时间口径必须一致**：同一问题拆出的多个子查询，时间字段必须统一，禁止混用不同时间字段（如一个用开始时间、另一个用创建时间）导致口径不一致；按日期分组时也要用同一时间字段做 DATE_FORMAT
+18. **CTE 别名作用域**：使用 WITH ... AS (...) 定义 CTE 时，若在 CTE 内部将某列设置了别名（如 `原始列 AS 别名`），则该 CTE 的输出列只有别名，后续 CTE 及主查询引用该列时**必须使用别名**，禁止再使用原始列名（否则触发 Unknown column 错误）；若外层查询需要使用原始列名，则 CTE 内部不要对该列设置别名，或同时选中原始列与别名列
+19. **外键 ID 必须关联名称展示**：当 SELECT / GROUP BY / ORDER BY 中使用外键 ID 字段（以 _id 结尾的关联字段）时，**必须**通过【ID 关联展示】中列出的关系 JOIN 关联表，使用关联表的名称/标题字段做展示和分组维度，**禁止**直接用 ID 数值做统计维度展示（用户看到的应是名称而非数字 ID）；JOIN 写法：`LEFT JOIN 关联表 ON 关联表.主键 = 源表.外键ID`，SELECT/GROUP BY 中替换为 `关联表.名称字段`"""
 
 
 def _schema_text(datasource_id: int, top_tables: list[TableMeta] | None = None,
@@ -196,7 +198,18 @@ def _schema_text(datasource_id: int, top_tables: list[TableMeta] | None = None,
                     seg = f"★{seg}"  # spec 已映射/检索命中的目标字段，优先使用
                 parts.append(seg)
             lines.append(f"{t.table_name}: {', '.join(parts)}")
-        return "\n".join(lines)
+        schema_body = "\n".join(lines)
+        # 追加外键 ID → 关联表.名称字段 的映射提示，引导 LLM 用名称替代 ID 做展示
+        try:
+            from .id_resolver import format_id_hints, get_id_display_hints
+            table_names = [t.table_name for t in tables]
+            hints = get_id_display_hints(datasource_id, table_names=table_names)
+            hint_text = format_id_hints(hints)
+        except Exception:  # noqa: BLE001
+            hint_text = ""
+        if hint_text:
+            schema_body += "\n\n【ID 关联展示（外键字段 → 关联表.名称字段，遇到该 ID 时 JOIN 关联表并用名称字段做展示/分组，禁止直接用 ID 值做维度）】\n" + hint_text
+        return schema_body
     finally:
         db.close()
 
@@ -1260,7 +1273,7 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
         user_prompt += f"""
 【上次执行失败，必须修正】
 {exec_error}
-请分析错误原因并修正 SQL：**保持用户问题的查询语义不变**（项目/时间/状态等过滤条件、分组维度、计数/聚合形态都不得删减或改变），只修正报错本身；只使用【可用表与字段】中确切存在的表名和字段；聚合查询中 GROUP BY 必须包含 SELECT 中全部非聚合列（注意 only_full_group_by 模式）；若错误为 Subquery returns more than 1 row，必须把 `= (SELECT ...)` 改为 `IN (SELECT ...)`；若错误为 Column 'xxx' in field list is ambiguous（列名歧义），必须为 SELECT、ORDER BY、WHERE、GROUP BY 中的重名列显式加上表别名限定（如 stat_a.xxx、stat_b.xxx），并保证 JOIN 条件与 SELECT 列使用同一别名；修正后**仅输出**修正后的 ```sql 代码块（含必要注释）。"""
+请分析错误原因并修正 SQL：**保持用户问题的查询语义不变**（项目/时间/状态等过滤条件、分组维度、计数/聚合形态都不得删减或改变），只修正报错本身；只使用【可用表与字段】中确切存在的表名和字段；聚合查询中 GROUP BY 必须包含 SELECT 中全部非聚合列（注意 only_full_group_by 模式）；若错误为 Subquery returns more than 1 row，必须把 `= (SELECT ...)` 改为 `IN (SELECT ...)`；若错误为 Column 'xxx' in field list is ambiguous（列名歧义），必须为 SELECT、ORDER BY、WHERE、GROUP BY 中的重名列显式加上表别名限定（如 stat_a.xxx、stat_b.xxx），并保证 JOIN 条件与 SELECT 列使用同一别名；若错误为 CTE 作用域错误（某字段已在 CTE 中被别名化），必须将后续查询中对该原始列名的引用全部替换为 CTE 输出的别名；若错误为字段不存在（尤其是 is_deleted 等软删字段），必须直接删除 SQL 中所有对该字段的引用（如 WHERE 条件），不要尝试用其他字段替代；修正后**仅输出**修正后的 ```sql 代码块（含必要注释）。"""
 
     client = llm
     if client is None or not client.configured:
@@ -1345,6 +1358,8 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
             validate_sql(sql, dialect)
             _check_tables_exist(sql, datasource_id)
             _check_columns_exist(sql, datasource_id)
+            _check_cte_alias_scope(sql)
+            _check_id_display(sql, datasource_id)
             shape_err = _count_shape_error(sql, spec_context)
             if shape_err:
                 raise ValueError(shape_err)
@@ -1669,7 +1684,7 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
         user_prompt += f"""
 【上次执行失败，必须修正】
 {exec_error}
-请分析错误原因并修正 SQL：**保持用户问题的查询语义不变**（项目/时间/状态等过滤条件、分组维度、计数/聚合形态都不得删减或改变），只修正报错本身；只使用【可用表与字段】中确切存在的表名和字段；聚合查询中 GROUP BY 必须包含 SELECT 中全部非聚合列（注意 only_full_group_by 模式）；若错误为 Subquery returns more than 1 row，必须把 `= (SELECT ...)` 改为 `IN (SELECT ...)`；若错误为 Column 'xxx' in field list is ambiguous（列名歧义），必须为 SELECT、ORDER BY、WHERE、GROUP BY 中的重名列显式加上表别名限定（如 stat_a.xxx、stat_b.xxx），并保证 JOIN 条件与 SELECT 列使用同一别名；修正后**仅输出**修正后的 ```sql 代码块（含必要注释）。"""
+请分析错误原因并修正 SQL：**保持用户问题的查询语义不变**（项目/时间/状态等过滤条件、分组维度、计数/聚合形态都不得删减或改变），只修正报错本身；只使用【可用表与字段】中确切存在的表名和字段；聚合查询中 GROUP BY 必须包含 SELECT 中全部非聚合列（注意 only_full_group_by 模式）；若错误为 Subquery returns more than 1 row，必须把 `= (SELECT ...)` 改为 `IN (SELECT ...)`；若错误为 Column 'xxx' in field list is ambiguous（列名歧义），必须为 SELECT、ORDER BY、WHERE、GROUP BY 中的重名列显式加上表别名限定（如 stat_a.xxx、stat_b.xxx），并保证 JOIN 条件与 SELECT 列使用同一别名；若错误为 CTE 作用域错误（某字段已在 CTE 中被别名化），必须将后续查询中对该原始列名的引用全部替换为 CTE 输出的别名；若错误为字段不存在（尤其是 is_deleted 等软删字段），必须直接删除 SQL 中所有对该字段的引用（如 WHERE 条件），不要尝试用其他字段替代；修正后**仅输出**修正后的 ```sql 代码块（含必要注释）。"""
 
     client = llm
     if client is None or not client.configured:
@@ -1754,6 +1769,8 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
             validate_sql(sql, dialect)
             _check_tables_exist(sql, datasource_id)
             _check_columns_exist(sql, datasource_id)
+            _check_cte_alias_scope(sql)
+            _check_id_display(sql, datasource_id)
             shape_err = _count_shape_error(sql, spec_context)
             if shape_err:
                 raise ValueError(shape_err)
@@ -1916,6 +1933,20 @@ def _check_columns_exist(sql: str, datasource_id: int) -> None:
             if ref_tables and not any(cname in cols_of.get(rt, set()) for rt in ref_tables):
                 unknown.append(cname)
     if unknown:
+        # 实时库交叉检查：元数据可能过期（缺列），对疑似缺失列查 information_schema 确认；
+        # 实际表中存在的列从 unknown 中移除并补入 cols_of，避免误报触发无效重试
+        from ..executor import get_table_columns
+        live_verified: set[str] = set()
+        for rt in ref_tables:
+            live_cols = get_table_columns(datasource_id, rt)
+            if live_cols:
+                live_names = {c["column_name"] for c in live_cols}
+                for u in list(unknown):
+                    if u in live_names and u not in live_verified:
+                        live_verified.add(u)
+                        cols_of.setdefault(rt, set()).add(u)
+        unknown = [u for u in unknown if u not in live_verified]
+    if unknown:
         # 列出每个引用表的可用列名，帮助 LLM 一次修正（避免把注释当列名）
         hints = []
         for rt in sorted(ref_tables):
@@ -1936,3 +1967,164 @@ def _check_columns_exist(sql: str, datasource_id: int) -> None:
             "字段不存在：" + ", ".join(sorted(set(unknown)))
             + hint_str + extra
             + "；请使用上表中的确切字段名修正 SQL")
+
+
+def _check_cte_alias_scope(sql: str) -> None:
+    """CTE 别名作用域校验：CTE 中将原始列别名化后，后续查询必须使用别名，
+    禁止再引用原始列名（否则触发「Unknown column」执行错误）。
+
+    仅检测明确的别名映射（原始列 AS 别名），且该原始列未在同一 CTE 中直接选中；
+    后续查询的 FROM/JOIN 中包含该 CTE 时，引用原始列名即报错。
+    """
+    import sqlglot
+    import sqlglot.expressions as exp
+    from ..executor import SqlExecError
+
+    try:
+        ast = sqlglot.parse_one(sql, read="mysql")
+    except Exception:  # noqa: BLE001
+        return  # 语法错误由其他校验器处理
+
+    ctes = list(ast.find_all(exp.CTE))
+    if not ctes:
+        return
+
+    # 收集每个 CTE 中「被别名化且未直接选中」的原始列 → 别名
+    cte_aliased: dict[str, dict[str, str]] = {}
+    for cte in ctes:
+        if not cte.alias or not isinstance(cte.this, exp.Select):
+            continue
+        aliased: dict[str, str] = {}
+        direct: set[str] = set()
+        for item in (cte.this.expressions or []):
+            if isinstance(item, exp.Alias) and isinstance(item.this, exp.Column):
+                aliased[item.this.name] = item.alias or item.this.name
+            elif isinstance(item, exp.Column):
+                direct.add(item.name)
+        # 仅保留「别名化且未直接选中」的列（直接选中的原始列仍在 CTE 输出中可用）
+        cte_aliased[cte.alias] = {k: v for k, v in aliased.items() if k not in direct}
+
+    if not any(cte_aliased.values()):
+        return
+
+    # 按定义顺序检查：每个 CTE 体可引用之前定义的 CTE；主查询可引用全部 CTE
+    defined: set[str] = set()
+
+    def _check_select(select: exp.Select, available_ctes: set[str],
+                      skip_col_ids: set[int] | None = None) -> None:
+        skip_col_ids = skip_col_ids or set()
+        from_ctes = {t.name for t in select.find_all(exp.Table) if t.name in available_ctes}
+        if not from_ctes:
+            return
+        # 当前查询 FROM 中涉及的 CTE 里，被别名化的原始列名 → 别名
+        aliased_map: dict[str, str] = {}
+        for cn in from_ctes:
+            aliased_map.update(cte_aliased.get(cn, {}))
+        if not aliased_map:
+            return
+        for col in select.find_all(exp.Column):
+            if id(col) in skip_col_ids:
+                continue
+            if col.table:  # 表限定列交给字段存在性校验
+                continue
+            cname = col.name or ""
+            if not cname:
+                continue
+            if cname in aliased_map:
+                raise SqlExecError(
+                    f"CTE 作用域错误：字段 `{cname}` 已在 CTE 中被别名化为 `{aliased_map[cname]}`，"
+                    f"后续查询必须使用别名 `{aliased_map[cname]}`，不能再引用原始列名 `{cname}`；"
+                    f"请修正 SQL 中的字段引用。")
+
+    for cte in ctes:
+        if isinstance(cte.this, exp.Select):
+            _check_select(cte.this, defined)
+        if cte.alias:
+            defined.add(cte.alias)
+
+    # 外层查询：检查所有不在 CTE 定义内部的 Select 节点（含主查询、子查询、UNION 各分支）。
+    # 收集 CTE 内部列节点 ID，避免外层 find_all 遍历进 CTE 定义造成误报。
+    cte_select_ids = {id(cte.this) for cte in ctes if isinstance(cte.this, exp.Select)}
+    cte_col_ids: set[int] = set()
+    for cte in ctes:
+        for col in cte.this.find_all(exp.Column):
+            cte_col_ids.add(id(col))
+    all_cte_names = set(cte_aliased.keys())
+    for sel in ast.find_all(exp.Select):
+        if id(sel) in cte_select_ids:
+            continue
+        _check_select(sel, all_cte_names, skip_col_ids=cte_col_ids)
+
+
+def _check_id_display(sql: str, datasource_id: int) -> None:
+    """外键 ID 展示校验：GROUP BY 中直接使用外键 ID 字段（以 _id 结尾），
+    且存在关联表的名称字段、但 SQL 未 JOIN 关联表时，报错触发 LLM 修正为名称展示。
+    仅检测最外层查询的 GROUP BY，避免对子查询/CTE 内部误报。"""
+    import sqlglot
+    import sqlglot.expressions as exp
+    from ..executor import SqlExecError
+
+    try:
+        ast = sqlglot.parse_one(sql, read="mysql")
+    except Exception:  # noqa: BLE001
+        return
+
+    # 找到最外层 SELECT（不在 CTE 内部）
+    cte_select_ids = {id(c.this) for c in ast.find_all(exp.CTE) if isinstance(c.this, exp.Select)}
+    outer = None
+    for sel in ast.find_all(exp.Select):
+        if id(sel) not in cte_select_ids:
+            outer = sel
+            break
+    if outer is None:
+        return
+
+    group = outer.args.get("group")
+    if not group:
+        return
+
+    # 收集 FROM/JOIN 中已引用的表
+    used_tables = {t.name for t in outer.find_all(exp.Table)}
+
+    # 收集 ID 关联提示（按 表名.列名 索引）
+    try:
+        from .id_resolver import get_id_display_hints
+        hints = get_id_display_hints(datasource_id)
+    except Exception:  # noqa: BLE001
+        return
+    hint_map: dict[tuple[str, str], dict] = {}
+    for h in hints:
+        hint_map[(h["src_table"], h["src_col"])] = h
+
+    # 别名 → 表名映射
+    alias_to_table: dict[str, str] = {}
+    for t in outer.find_all(exp.Table):
+        if t.alias:
+            alias_to_table[t.alias] = t.name
+
+    for col in group.find_all(exp.Column):
+        cname = (col.name or "").lower()
+        if not cname.endswith("_id") or cname == "id":
+            continue
+        # 确定该列所属的表
+        owner_tables: list[str] = []
+        if col.table:
+            tname = alias_to_table.get(col.table, col.table)
+            owner_tables = [tname]
+        else:
+            # 未限定列：可能属于任意已引用表
+            owner_tables = list(used_tables)
+        for tname in owner_tables:
+            hint = hint_map.get((tname, col.name))
+            if not hint:
+                continue
+            # 关联表已在 FROM/JOIN 中，视为已处理
+            if hint["dst_table"] in used_tables:
+                continue
+            disp = hint["display_col"] or hint["dst_col"]
+            raise SqlExecError(
+                f"分组维度使用了外键 ID `{tname}.{col.name}`，"
+                f"应 JOIN 关联表 `{hint['dst_table']}` "
+                f"（ON {hint['dst_table']}.{hint['dst_col']} = {tname}.{col.name}），"
+                f"并用 `{hint['dst_table']}.{disp}` 做展示/分组维度，"
+                f"禁止直接用 ID 数值做统计展示。")

@@ -105,6 +105,7 @@ def probe_table_clarify(sub: SubQuerySpec, datasource_id: int,
     """
     try:
         from ..engine.nl2sql import _llm_select_tables, _detect_clarify
+        from .id_resolver import narrow_candidate_tables
 
         tables, meta = _llm_select_tables(
             datasource_id, sub.question,
@@ -115,16 +116,19 @@ def probe_table_clarify(sub: SubQuerySpec, datasource_id: int,
             hits = meta.get("hint_hits") or []
             if not hits:
                 return {"needs": False, "candidates": [], "reason": "no_table_no_hint"}
-            candidates = [{"table": t, "comment": ""} for t in hits[:15]]
+            raw_candidates = [{"table": t, "comment": ""} for t in hits]
+            candidates = narrow_candidate_tables(datasource_id, raw_candidates, question=sub.question)
             return {"needs": True, "candidates": candidates, "reason": "no_table"}
         # LLM 选中多张表：执行时大概率触发 clarify（LLM 选表不稳定），预览阶段直接要求澄清
         if len(tables) >= 2:
-            candidates = [{"table": t.table_name,
-                           "comment": getattr(t, "comment", "") or ""} for t in tables[:15]]
+            raw_candidates = [{"table": t.table_name,
+                               "comment": getattr(t, "comment", "") or ""} for t in tables]
+            candidates = narrow_candidate_tables(datasource_id, raw_candidates, question=sub.question)
             return {"needs": True, "candidates": candidates, "reason": "multi_table"}
         clarify = _detect_clarify(sub.question, datasource_id, tables)
         if clarify:
-            return {"needs": True, "candidates": clarify[:15], "reason": "ambiguous"}
+            candidates = narrow_candidate_tables(datasource_id, clarify, question=sub.question)
+            return {"needs": True, "candidates": candidates, "reason": "ambiguous"}
         return {"needs": False, "candidates": [], "reason": "ok"}
     except Exception as exc:  # noqa: BLE001
         logger.warning("[多查询][选表探测] 子查询 %s 探测失败（跳过）: %s", sub.sub_id, exc)
