@@ -1115,12 +1115,60 @@ def _extract_bad_fields(error_msg: str) -> list[str]:
     return list(dict.fromkeys(fields))  # 去重保序
 
 
+def _auto_qualify_ambiguous_columns(sql: str, datasource_id: int) -> str:
+    """确定性自动修复：JOIN 多表时，WHERE/GROUP BY/ORDER BY/HAVING 中未限定的歧义列
+    用 FROM 中第一个表限定。仅修改未限定且确实在多表中存在的列。"""
+    import sqlglot
+    import sqlglot.expressions as exp
+    from ..executor import get_table_columns
+
+    try:
+        ast = sqlglot.parse_one(sql, read="mysql")
+    except Exception:  # noqa: BLE001
+        return sql
+
+    changed = False
+    for sel in ast.find_all(exp.Select):
+        sel_tables = [t.name for t in sel.find_all(exp.Table)]
+        if len(sel_tables) < 2:
+            continue
+        first_table = sel_tables[0]
+        # 获取列集合
+        table_cols: dict[str, set[str]] = {}
+        for tname in sel_tables:
+            try:
+                cols = get_table_columns(datasource_id, tname)
+                table_cols[tname] = {c["column_name"] for c in cols} if isinstance(cols, list) else set()
+            except Exception:  # noqa: BLE001
+                table_cols[tname] = set()
+        # 检查 WHERE/GROUP BY/ORDER BY/HAVING 中的未限定列
+        for key in ("where", "group", "order", "having"):
+            clause = sel.args.get(key)
+            if not clause:
+                continue
+            for col in clause.find_all(exp.Column):
+                if col.table:
+                    continue
+                cname = col.name or ""
+                if not cname:
+                    continue
+                present_in = [t for t in sel_tables if cname in table_cols.get(t, set())]
+                if len(present_in) >= 2:
+                    col.set("table", exp.to_identifier(first_table))
+                    changed = True
+    if changed:
+        return ast.sql(dialect="mysql")
+    return sql
+
+
 def _run_validations(sql: str, datasource_id: int, question: str, dialect: str) -> str:
     """运行全部 SQL 校验链，通过后应用中文字段别名并返回最终 SQL；失败抛异常。"""
+    from ..executor import validate_sql
     validate_sql(sql, dialect)
     _check_tables_exist(sql, datasource_id)
     _check_columns_exist(sql, datasource_id)
     _check_cte_alias_scope(sql)
+    _check_ambiguous_columns(sql, datasource_id)
     _check_id_display(sql, datasource_id)
     shape_err = _count_shape_error(sql, None)
     if shape_err:
@@ -1457,6 +1505,22 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
                         return
                     except Exception:  # noqa: BLE001
                         logger.info("[NL2SQL] 确定性自动修复后仍校验失败，回退 LLM 重试")
+            # 确定性自动修复：歧义列 → 用 FROM 第一个表限定
+            if "列歧义" in last_error or "ambiguous" in last_error.lower():
+                fixed_sql = _auto_qualify_ambiguous_columns(sql, datasource_id)
+                if fixed_sql != sql:
+                    try:
+                        fixed_sql = _run_validations(fixed_sql, datasource_id, question, dialect)
+                        logger.info("[NL2SQL] 确定性自动修复成功: 歧义列已加表限定, 校验通过")
+                        yield {"type": "result", "result": {
+                            "intent": "query", "sql": fixed_sql,
+                            "explain": content, "tables": [t.table_name for t in tables],
+                            "selected_tables": select_meta.get("raw", []),
+                            "select_source": select_meta.get("source", ""),
+                            "rag_hits": _rag_hits}}
+                        return
+                    except Exception:  # noqa: BLE001
+                        logger.info("[NL2SQL] 歧义列自动修复后仍校验失败，回退 LLM 重试")
             yield {"type": "retry", "msg": "SQL 校验中，正在修正…"}
             messages.append({"role": "assistant", "content": content})
             messages.append({"role": "user",
@@ -1877,6 +1941,22 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
                         return
                     except Exception:  # noqa: BLE001
                         logger.info("[NL2SQL] 确定性自动修复后仍校验失败，回退 LLM 重试")
+            # 确定性自动修复：歧义列 → 用 FROM 第一个表限定
+            if "列歧义" in last_error or "ambiguous" in last_error.lower():
+                fixed_sql = _auto_qualify_ambiguous_columns(sql, datasource_id)
+                if fixed_sql != sql:
+                    try:
+                        fixed_sql = _run_validations(fixed_sql, datasource_id, question, dialect)
+                        logger.info("[NL2SQL] 确定性自动修复成功: 歧义列已加表限定, 校验通过")
+                        yield {"type": "result", "result": {
+                            "intent": "query", "sql": fixed_sql,
+                            "explain": content, "tables": [t.table_name for t in tables],
+                            "selected_tables": select_meta.get("raw", []),
+                            "select_source": select_meta.get("source", ""),
+                            "rag_hits": _rag_hits}}
+                        return
+                    except Exception:  # noqa: BLE001
+                        logger.info("[NL2SQL] 歧义列自动修复后仍校验失败，回退 LLM 重试")
             yield {"type": "retry", "msg": "SQL 校验中，正在修正…"}
             messages.append({"role": "assistant", "content": content})
             messages.append({"role": "user",
@@ -2111,10 +2191,11 @@ def _check_cte_alias_scope(sql: str) -> None:
         for col in select.find_all(exp.Column):
             if id(col) in skip_col_ids:
                 continue
-            if col.table:  # 表限定列交给字段存在性校验
-                continue
             cname = col.name or ""
             if not cname:
+                continue
+            # 表限定列：仅当表名是当前查询引用的 CTE 别名时才检查（实际表列交给字段存在性校验）
+            if col.table and col.table not in from_ctes:
                 continue
             if cname in aliased_map:
                 raise SqlExecError(
@@ -2140,6 +2221,73 @@ def _check_cte_alias_scope(sql: str) -> None:
         if id(sel) in cte_select_ids:
             continue
         _check_select(sel, all_cte_names, skip_col_ids=cte_col_ids)
+
+
+def _check_ambiguous_columns(sql: str, datasource_id: int) -> None:
+    """JOIN 多表时，WHERE/GROUP BY/ORDER BY/HAVING 中未限定的列若在多张表中都存在，
+    执行时会报 ambiguous column。提前检测并报错，引导 LLM 加表限定。"""
+    import sqlglot
+    import sqlglot.expressions as exp
+    from ..executor import SqlExecError, get_table_columns
+
+    try:
+        ast = sqlglot.parse_one(sql, read="mysql")
+    except Exception:  # noqa: BLE001
+        return
+
+    # 收集主查询（含子查询）中所有 FROM/JOIN 的真实表
+    all_tables: list[str] = []
+    for sel in ast.find_all(exp.Select):
+        for t in sel.find_all(exp.Table):
+            name = t.name
+            if name and name not in all_tables:
+                all_tables.append(name)
+    if len(all_tables) < 2:
+        return  # 单表无歧义
+
+    # 获取每张表的列集合（缓存）
+    table_cols: dict[str, set[str]] = {}
+    for tname in all_tables:
+        try:
+            cols = get_table_columns(datasource_id, tname)
+            table_cols[tname] = {c["column_name"] for c in cols} if isinstance(cols, list) else set()
+        except Exception:  # noqa: BLE001
+            table_cols[tname] = set()
+
+    # 对每个 Select 节点，检查其 WHERE/GROUP BY/ORDER BY/HAVING 中的未限定列
+    for sel in ast.find_all(exp.Select):
+        sel_tables = [t.name for t in sel.find_all(exp.Table)]
+        if len(sel_tables) < 2:
+            continue
+        # 收集该查询中所有未限定列（col.table 为空），排除 SELECT 列表中的别名定义
+        qualified_prefixes: set[str] = set()
+        for col in sel.find_all(exp.Column):
+            if col.table:
+                qualified_prefixes.add(col.table)
+        # 检查 WHERE/GROUP BY/ORDER BY/HAVING 中的未限定列
+        clauses = []
+        if sel.args.get("where"):
+            clauses.append(sel.args["where"])
+        if sel.args.get("group"):
+            clauses.append(sel.args["group"])
+        if sel.args.get("order"):
+            clauses.append(sel.args["order"])
+        if sel.args.get("having"):
+            clauses.append(sel.args["having"])
+        for clause in clauses:
+            for col in clause.find_all(exp.Column):
+                if col.table:
+                    continue  # 已限定
+                cname = col.name or ""
+                if not cname:
+                    continue
+                # 检查该列在多少张表中存在
+                present_in = [t for t in sel_tables if cname in table_cols.get(t, set())]
+                if len(present_in) >= 2:
+                    raise SqlExecError(
+                        f"列歧义：字段 `{cname}` 在表 {present_in} 中都存在，"
+                        f"必须加表限定（如 `{sel_tables[0]}.{cname}`）；"
+                        f"请修正 SQL 中 WHERE/GROUP BY/ORDER BY/HAVING 的字段引用。")
 
 
 def _check_id_display(sql: str, datasource_id: int) -> None:

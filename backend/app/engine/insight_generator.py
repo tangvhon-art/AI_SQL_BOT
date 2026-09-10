@@ -120,16 +120,32 @@ class InsightGenerator:
         return InsightConfig(purpose=purpose, datasource_id=datasource_id, items=items, model_id=model_id)
 
     def preview(self, config: InsightConfig, user_id: int = 0) -> list[dict]:
-        """预览：对每个启用分析项执行 NL2SQL + 查询，返回卡片数据（不保存报告）。"""
+        """预览：对每个启用分析项走完整 AI 问数链路（要素提取 → 结构化 spec → NL2SQL → 查询）。"""
         from ..executor import run_query, SqlExecError
-        from .nl2sql import generate_sql
+        from .nl2sql import generate_sql_stream
+        from .query_spec import SubQuerySpec
+        from .sub_spec import enrich_sub_specs
 
         enabled_items = [item for item in config.items if item.enabled]
         if not enabled_items:
             return []
 
+        # 批量要素提取（与 AI 问数 Phase A 同一逻辑），为每个子问题构建结构化 spec
+        sub_questions = [item.question for item in enabled_items]
+        enriched: list[SubQuerySpec] = []
+        try:
+            enriched = enrich_sub_specs(
+                question=config.purpose,
+                sub_questions=sub_questions,
+                parent_spec=None,
+                llm=self.llm,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("洞察预览 要素提取失败，降级为纯问题生成: %s", exc)
+            enriched = [SubQuerySpec(sub_id=f"q{i+1}", question=q) for i, q in enumerate(sub_questions)]
+
         results = []
-        for item in enabled_items:
+        for idx, item in enumerate(enabled_items):
             card = {
                 "id": item.id,
                 "title": item.title,
@@ -142,10 +158,29 @@ class InsightGenerator:
                 "error": "",
             }
             try:
+                sub = enriched[idx] if idx < len(enriched) else SubQuerySpec(
+                    sub_id=item.id, question=item.question)
+                # 用户在向导中选择的图表类型覆盖要素提取的 chart_hint
+                if item.chart_type:
+                    sub.chart_hint = item.chart_type
+                # 构建 spec_context（与 AI 问数 N2 同一格式）
+                try:
+                    spec_context = {"spec": sub.to_query_spec().model_dump(mode="json"),
+                                    "mapping": {}, "plan": {}}
+                except Exception:  # noqa: BLE001
+                    spec_context = {}
+                table_hints = sub.table_hints or None
+                question_text = item.question
+                if sub.confirmed_tables:
+                    question_text = f"{question_text}，已确认查询表：{'、'.join(sub.confirmed_tables)}"
+
                 gen_result = None
-                for event in generate_sql(
-                    config.datasource_id, self.workspace_id, item.question,
-                    llm=self.llm):
+                for event in generate_sql_stream(
+                    config.datasource_id, self.workspace_id, question_text,
+                    llm=self.llm,
+                    table_hints=table_hints,
+                    spec_context=spec_context,
+                ):
                     if isinstance(event, dict) and event.get("type") == "result":
                         gen_result = event.get("result")
                         break
