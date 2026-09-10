@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -59,6 +61,19 @@ class InsightConfig:
                  for item in d.get("items", [])]
         return cls(purpose=d.get("purpose", ""), datasource_id=d.get("datasource_id", 0),
                    items=items, model_id=d.get("model_id"))
+
+
+def _json_safe(obj: Any) -> Any:
+    """递归将 date/datetime/Decimal 等不可 JSON 序列化的类型转为字符串。"""
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
 
 
 class InsightGenerator:
@@ -237,6 +252,7 @@ class InsightGenerator:
         )
         dashboard_data = {"layout": layout, "cards": dashboard_cards,
                            "original_question": config.purpose}
+        dashboard_data = _json_safe(dashboard_data)
 
         # 2. AI 解读
         interpretation = {}
@@ -268,7 +284,7 @@ class InsightGenerator:
             template_id=template_id,
             report_id=report.id,
             name=report.title,
-            config_snapshot=config.to_dict(),
+            config_snapshot=_json_safe(config.to_dict()),
             status="success",
             created_by=created_by,
         )
