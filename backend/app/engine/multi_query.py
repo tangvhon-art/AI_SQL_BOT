@@ -294,6 +294,22 @@ class MultiQueryDecomposer:
                     source, hit_rule, len(sub_specs),
                     [s.question[:40] for s in sub_specs])
 
+        # 选表澄清探测：预判子查询执行时是否会触发选表歧义（用户确认前先澄清）
+        if sub_specs:
+            try:
+                from .sub_spec import probe_table_clarify
+                for s in sub_specs:
+                    probe = probe_table_clarify(
+                        s, datasource_id, llm=self.llm)
+                    if probe.get("needs"):
+                        s.needs_tables = True
+                        s.candidate_tables = probe.get("candidates") or []
+                        logger.info("[多查询拆解] 子查询 %s 需澄清选表（%s），候选 %d 张: %s",
+                                    s.sub_id, probe.get("reason"), len(s.candidate_tables),
+                                    [c.get("table") for c in s.candidate_tables][:8])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[多查询拆解] 选表探测失败（跳过澄清）: %s", exc)
+
         return MultiQuerySpec(
             original_question=question,
             sub_queries=sub_specs,

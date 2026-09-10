@@ -380,6 +380,10 @@ class SubQuerySpec(BaseModel):
     title: str | None = None               # 卡片标题（LLM 生成）
     confidence: float = 0.5                # 要素提取置信度（低置信度前端高亮提示）
     enabled: bool = True                   # 用户确认时是否启用（停用项不执行）
+    # 选表澄清（Phase A 探测）：子查询选表歧义时，预览面板展示候选表供用户确认
+    needs_tables: bool = False             # 需要用户确认查询表
+    candidate_tables: list[dict] = Field(default_factory=list)   # [{table, comment}]
+    confirmed_tables: list[str] = Field(default_factory=list)    # 用户澄清确认的表（confirm 携带）
 
     def to_query_spec(self) -> QuerySpec:
         """转换为旧版 QuerySpec，传入 generate_sql_stream。"""

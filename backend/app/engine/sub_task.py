@@ -228,6 +228,11 @@ def _generate_sql_with_retry(sub: Any, ctx: SubTaskContext) -> str:
     from ..engine.nl2sql import generate_sql_stream
 
     question = sub.question.strip("，,。.；; ")
+    # 用户澄清确认的表（Phase A 勾选）：拼入问题文本，走现有「已确认查询表」锁定路径
+    confirmed = getattr(sub, "confirmed_tables", None) or []
+    if confirmed:
+        question = f"{question}，已确认查询表：{'、'.join(confirmed)}"
+        logger.info("[子查询][%s] N2 使用澄清确认表: %s", sub.sub_id, confirmed)
     max_attempts = 1 + max(0, ctx.gen_retry)
     last_error: str = ""
     for attempt in range(1, max_attempts + 1):

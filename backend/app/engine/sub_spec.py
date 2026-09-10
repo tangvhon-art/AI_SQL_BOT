@@ -94,6 +94,38 @@ def _dim_names(dims: list[Any]) -> list[str]:
     return out
 
 
+def probe_table_clarify(sub: SubQuerySpec, datasource_id: int,
+                        llm: Any = None) -> dict:
+    """选表探测（Phase A）：预判子查询执行时是否会触发选表澄清。
+
+    返回 {"needs": bool, "candidates": [...], "reason": str}。
+    - 选表成功且无歧义 → needs=False
+    - 无表/多表歧义 → needs=True + 候选表（优先 hint 命中，其次歧义候选）
+    - 探测异常/LLM 不可用 → needs=False（不阻塞拆解，执行时走原兜底）
+    """
+    try:
+        from ..engine.nl2sql import _llm_select_tables, _detect_clarify
+
+        tables, meta = _llm_select_tables(
+            datasource_id, sub.question,
+            schema_name=sub.schema_name or None,
+            llm=llm, table_hints=sub.table_hints or None)
+        if not tables:
+            # 无可用表：候选 = 四维检索命中表（执行时 LLM 未配置也会 mock/失败）
+            hits = meta.get("hint_hits") or []
+            if not hits:
+                return {"needs": False, "candidates": [], "reason": "no_table_no_hint"}
+            candidates = [{"table": t, "comment": ""} for t in hits[:15]]
+            return {"needs": True, "candidates": candidates, "reason": "no_table"}
+        clarify = _detect_clarify(sub.question, datasource_id, tables)
+        if clarify:
+            return {"needs": True, "candidates": clarify[:15], "reason": "ambiguous"}
+        return {"needs": False, "candidates": [], "reason": "ok"}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[多查询][选表探测] 子查询 %s 探测失败（跳过）: %s", sub.sub_id, exc)
+        return {"needs": False, "candidates": [], "reason": "probe_error"}
+
+
 def enrich_sub_specs(
     question: str,
     sub_questions: list[str],
