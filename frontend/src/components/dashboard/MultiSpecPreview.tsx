@@ -6,7 +6,7 @@ import {
 } from 'antd'
 import {
   DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined,
-  CheckOutlined, CloseOutlined, TableOutlined,
+  CheckOutlined, CloseOutlined, TableOutlined, SearchOutlined,
 } from '@ant-design/icons'
 import type { SubQuerySpec } from '../../types/chart'
 
@@ -34,6 +34,8 @@ export default function MultiSpecPreview({
 
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState({ question: '', title: '' })
+  // 每个子查询的待选表搜索关键词（按 sub_id 隔离）
+  const [tableSearch, setTableSearch] = useState<Record<string, string>>({})
 
   const enabledCount = items.filter((q) => q.enabled !== false).length
   // 需澄清但未选表的子查询数（阻塞确认）
@@ -163,19 +165,40 @@ export default function MultiSpecPreview({
                           message={<span style={{ fontSize: 12 }}>未识别到完整指标/维度，可编辑补全</span>}
                         />
                       ) : null}
-                      {q.needs_tables ? (
+                      {q.needs_tables ? (() => {
+                        const raw = q.candidate_tables ?? []
+                        const kw = (tableSearch[q.sub_id] || '').trim().toLowerCase()
+                        const filtered = kw
+                          ? raw.filter((t) =>
+                              t.table.toLowerCase().includes(kw) ||
+                              (t.comment || '').toLowerCase().includes(kw))
+                          : raw
+                        return (
                         <div style={{
                           marginTop: 8, border: '1px dashed #B7A8F8', borderRadius: 8,
                           padding: '8px 10px', background: '#FBF9FF',
                         }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
                             <TableOutlined style={{ color: '#7B61E8' }} />
                             <span style={{ fontSize: 12.5, fontWeight: 600, color: '#4B3FD4' }}>
                               请选择该子查询要查询的数据表（可多选）
                             </span>
+                            <span style={{ fontSize: 11, color: '#8c8c8c' }}>
+                              {kw ? `匹配 ${filtered.length}/${raw.length}` : `共 ${raw.length} 张`}
+                            </span>
+                            <Input
+                              size="small"
+                              placeholder="搜索表名或注释"
+                              prefix={<SearchOutlined style={{ color: '#bfbfbf' }} />}
+                              value={tableSearch[q.sub_id] || ''}
+                              allowClear
+                              disabled={!!busy}
+                              onChange={(e) => setTableSearch((prev) => ({ ...prev, [q.sub_id]: e.target.value }))}
+                              style={{ width: 200, marginLeft: 'auto' }}
+                            />
                           </div>
-                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                            {(q.candidate_tables ?? []).map((t) => {
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, maxHeight: 180, overflowY: 'auto' }}>
+                            {filtered.map((t) => {
                               const checked = (q.confirmed_tables ?? []).includes(t.table)
                               return (
                                 <Checkbox
@@ -198,14 +221,19 @@ export default function MultiSpecPreview({
                                 </Checkbox>
                               )
                             })}
-                            {(q.candidate_tables ?? []).length === 0 ? (
+                            {raw.length === 0 ? (
                               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                                 未识别到候选表，可编辑问题补充表名后重试
+                              </Typography.Text>
+                            ) : filtered.length === 0 ? (
+                              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                未找到匹配「{tableSearch[q.sub_id]}」的表
                               </Typography.Text>
                             ) : null}
                           </div>
                         </div>
-                      ) : null}
+                        )
+                      })() : null}
                     </>
                   )}
                 </div>

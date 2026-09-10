@@ -125,15 +125,13 @@ def format_id_hints(hints: list[dict]) -> str:
     return "\n".join(lines)
 
 
-# 噪声表关键词（备份/配置/快照/统计/黑白名单等，不适合作为主查询事实表）
+# 噪声表关键词（备份/测试/配置/统计/黑白名单等，明确不适合作为主查询事实表）
+# 仅过滤确定性噪声，避免误杀合法业务表（如 flow_node、flow_summary、flow_tag 等）
 _NOISE_NAME_RE = re.compile(
     r"(_bak|backup|_snapshot|_uat|_test|_tmp|_temp|_log$|white_list|black_list|"
     r"_callback_config|_processor_config|_global_config|_check_formula_change|"
-    r"_month_statistics|_statistics$|_stats$|checklist$|_relation$|_mapping$|"
-    r"_mark$|_condition$|_branch$|_processor_white_list|_seal_file|_seal_task|"
-    r"_bill_relation|_preview_record|_ai_summary|_callback_record|_role_template|"
-    r"_card_info|_card_list|_node_uat|_node_his|_node_bak|_node_condition_relation|"
-    r"_summary$|_tag$|_flow_node|_flow_condition|_flow_branch|_flow_node)",
+    r"_month_statistics|_statistics$|_stats$|checklist$|_processor_white_list|"
+    r"_node_uat|_node_his|_node_bak|_node_condition_relation)",
     re.IGNORECASE,
 )
 
@@ -197,4 +195,8 @@ def narrow_candidate_tables(datasource_id: int, candidates: list[dict],
 
     # 按分数降序，同分保持原顺序
     scored.sort(key=lambda x: -x[0])
-    return [c for _, c in scored[:top_k]]
+    result = [c for _, c in scored[:top_k]]
+    # 兜底：收窄后若为空但原候选非空（如关系库为空且噪声过滤过严），返回原候选前 top_k
+    if not result and candidates:
+        result = candidates[:top_k]
+    return result

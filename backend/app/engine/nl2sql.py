@@ -1108,6 +1108,12 @@ def generate_sql(datasource_id: int, workspace_id: int, question: str,
                 logger.warning("[问数][选表] 读取全表候选失败: %s", e2)
             if cand and _hints:
                 cand.sort(key=lambda c: _hint_hit_index(c["table"], c.get("comment") or "", _hints))
+            # 关系图收窄候选表：过滤噪声表 + 事实表置顶 + top 8
+            try:
+                from .id_resolver import narrow_candidate_tables
+                cand = narrow_candidate_tables(datasource_id, cand, question=question)
+            except Exception:  # noqa: BLE001
+                pass
             return {"intent": "clarify", "sql": "",
                 "explain": f"未能自动识别与问题相关的数据表（{exc}）。请在下方勾选需要查询的表（可多选，将分别查询）：",
                 "tables": [c["table"] for c in cand],
@@ -1462,6 +1468,12 @@ def generate_sql_stream(datasource_id: int, workspace_id: int, question: str,
                         if _hint_hit_index(c["table"], c.get("comment") or "", _hints) < 99]
                 if _top:
                     logger.info("[问数][选表] 拆表检索词命中候选置顶: %s", _top)
+            # 关系图收窄候选表：过滤噪声表 + 事实表置顶 + top 8
+            try:
+                from .id_resolver import narrow_candidate_tables
+                cand = narrow_candidate_tables(datasource_id, cand, question=question)
+            except Exception:  # noqa: BLE001
+                pass
             logger.info("[问数][选表] 表澄清候选 %d 张: %s", len(cand),
                         [c["table"] for c in cand][:20])
             yield {"type": "result", "result": {
