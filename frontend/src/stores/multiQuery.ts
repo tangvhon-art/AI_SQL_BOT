@@ -5,6 +5,30 @@ import type { SubQuerySpec, SubCardState, SubCardStatus } from '../types/chart'
 
 export type MultiPhase = 'idle' | 'preview' | 'executing' | 'done' | 'cancelled'
 
+/** 用户问题中显式图表关键词 → 图表类型（与后端 N5 关键词表保持一致） */
+const USER_CHART_KEYWORDS: Record<string, string[]> = {
+  pie: ['饼图', '饼状图', '扇形图'],
+  line: ['折线图', '趋势图', '曲线图', '面积图'],
+  bar: ['柱状图', '条形图', '柱形图'],
+  rank: ['排行榜', '排名图', '榜单'],
+  kpi: ['kpi', '指标卡', '数字卡', '大数字'],
+  radar: ['雷达图'],
+  combo: ['组合图', '双轴图', '双y轴'],
+  stack_bar: ['堆叠图', '堆叠柱状图'],
+  group_bar: ['分组柱状图', '分组图'],
+}
+
+/** 若子查询问题中用户明确要求某种图表，覆盖 chart_hint（保证预览徽标与执行结果一致） */
+function applyUserChartPreference(q: SubQuerySpec): SubQuerySpec {
+  const text = (q.question || '').toLowerCase()
+  for (const [chart, keywords] of Object.entries(USER_CHART_KEYWORDS)) {
+    if (keywords.some((k) => text.includes(k))) {
+      return { ...q, chart_hint: chart }
+    }
+  }
+  return q
+}
+
 interface MultiQueryState {
   taskId: string
   preview: SubQuerySpec[]           // 拆解预览（用户确认前可编辑）
@@ -80,7 +104,7 @@ export const useMultiQueryStore = create<MultiQueryState>((set, get) => ({
   initPreview: (payload) =>
     set({
       taskId: payload.task_id ?? '',
-      preview: payload.sub_queries ?? [],
+      preview: (payload.sub_queries ?? []).map(applyUserChartPreference),
       layoutHint: payload.layout_hint ?? 'auto',
       originQuestion: payload.original_question ?? '',
       phase: 'preview',
@@ -88,7 +112,7 @@ export const useMultiQueryStore = create<MultiQueryState>((set, get) => ({
     }),
 
   setPreview: (subs, layoutHint, taskId) =>
-    set({ preview: subs, layoutHint, taskId: taskId ?? get().taskId, phase: 'preview' }),
+    set({ preview: subs.map(applyUserChartPreference), layoutHint, taskId: taskId ?? get().taskId, phase: 'preview' }),
 
   updatePreviewSub: (subId, patch) =>
     set((s) => ({

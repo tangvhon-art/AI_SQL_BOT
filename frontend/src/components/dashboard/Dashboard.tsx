@@ -27,16 +27,28 @@ interface DashboardProps {
 }
 
 /**
- * 智能图表类型推荐：根据数据特征自动选择
+ * 智能图表类型推荐：根据数据特征自动选择（仅作后端未指定时的兜底）。
+ * 后端已返回明确图表类型（pie/rank/radar/combo/stack_bar/line/kpi 等）时直接尊重，
+ * 避免前端简单规则覆盖掉后端的占比→饼图、用户显式要求等更准确的推荐。
  */
 function recommendChartType(card: ChartCardConfig): ChartType {
   const { dataset } = card;
   const rowCount = dataset.rows.length;
-  const colCount = dataset.dimensions.length + dataset.metrics.length;
+
+  // 后端已指定非默认图表类型 → 直接尊重（pie/rank/radar/combo/stack_bar/line/kpi 等）
+  const deliberateTypes: ChartType[] = ['pie', 'rank', 'radar', 'combo', 'stack_bar', 'line', 'kpi', 'kpi_group'];
+  if (deliberateTypes.includes(card.chartType)) {
+    return card.chartType;
+  }
 
   if (rowCount === 0) return card.chartType;
   if (rowCount === 1 && dataset.metrics.length === 1) return 'kpi';
   if (rowCount === 1 && dataset.metrics.length > 1) return 'kpi_group';
+
+  // 兜底：占比/构成类指标 + 2~8 行 → 饼图
+  const ratioKeywords = ['占比', '比例', '构成', '百分比', '份额', '比重'];
+  const hasRatioMetric = dataset.metrics.some((m) => ratioKeywords.some((k) => m.includes(k)));
+  if (hasRatioMetric && rowCount > 1 && rowCount <= 8) return 'pie';
 
   const timeKeywords = ['时间', '日期', '月', '日', '年', '周', '季度', 'date', 'time', 'month', 'day', 'year'];
   const firstDim = dataset.dimensions[0]?.toLowerCase() || '';
