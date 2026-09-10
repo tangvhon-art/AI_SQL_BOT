@@ -15,13 +15,14 @@ import { useChatStore } from '../stores/chat'
 import { useMultiQueryStore } from '../stores/multiQuery'
 import type { InterpretationResult, SubQuerySpec } from '../types/chart'
 
-// Dashboard + AI 解读组合块（V2：总览解读 + 单卡重试）
-function DashboardBlock({ dashboard, aiInterpretation, aiLoading, onRetryCard, retryDisabled }: {
+// Dashboard + AI 解读组合块（V2：总览解读 + 单卡重试 + 保存报告）
+function DashboardBlock({ dashboard, aiInterpretation, aiLoading, onRetryCard, retryDisabled, onSaveReport }: {
   dashboard: Record<string, unknown>
   aiInterpretation?: Record<string, unknown>
   aiLoading?: boolean
   onRetryCard?: (subId: string, confirmedTables?: string[]) => void
   retryDisabled?: (subId: string) => boolean
+  onSaveReport?: () => void
 }) {
   const data = convertDashboardEvent(dashboard)
   const interpretation = aiInterpretation as InterpretationResult | undefined
@@ -40,6 +41,13 @@ function DashboardBlock({ dashboard, aiInterpretation, aiLoading, onRetryCard, r
       {(interpretation || aiLoading) && (
         <AiInterpretation result={interpretation} loading={aiLoading} rawText={interpretation?.rawText} />
       )}
+      {onSaveReport && (
+        <Space size={4} style={{ alignSelf: 'flex-end' }}>
+          <Button size="small" type="primary" icon={<SaveOutlined />} onClick={onSaveReport}>
+            保存至报告中心
+          </Button>
+        </Space>
+      )}
     </div>
   )
 }
@@ -55,6 +63,8 @@ interface Props {
   onRetryCard?: (subId: string, confirmedTables?: string[]) => void
   /** 多查询 V2：整体取消 */
   onCancelMulti?: () => void
+  /** 保存至报告中心（多查询 Dashboard 结果） */
+  onSaveReport?: (msg: ChatMsg) => void
   /** 多查询 V2：重试防抖 */
   retryDisabled?: (subId: string) => boolean
   multiCancelLoading?: boolean
@@ -240,7 +250,7 @@ function ClarifyCard({ text, candidates, originalQuestion, kind, onConfirm }: {
 
 export default function MessageCard({
   msg, onSaveQuery, onFeedback, onClarifyConfirm,
-  onMultiConfirm, onRetryCard, onCancelMulti, retryDisabled, multiCancelLoading,
+  onMultiConfirm, onRetryCard, onCancelMulti, retryDisabled, multiCancelLoading, onSaveReport,
 }: Props) {
   const c = (msg.content ?? {}) as Record<string, unknown>
   // 多查询 V2 状态（预览/执行进度由全局 store 驱动）
@@ -466,6 +476,7 @@ export default function MessageCard({
             aiLoading={!!c.ai_interpretation_loading}
             onRetryCard={onRetryCard}
             retryDisabled={retryDisabled}
+            onSaveReport={() => onSaveReport?.(msg)}
           />
         ) : null}
         {c.sql ? <SqlBlock sql={String(c.sql)} permission={String(c.permission ?? '')} /> : null}

@@ -100,8 +100,8 @@ def _to_dict(p: Report, detail: bool = False) -> dict:
         "original_question": p.original_question,
         "remark": p.remark,
         "created_by": p.created_by,
-        "created_at": p.created_at.isoformat() if p.created_at else None,
-        "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+        "created_at": p.create_time.isoformat() if p.create_time else None,
+        "updated_at": p.update_time.isoformat() if p.update_time else None,
     }
     if detail:
         d["multi_query_spec"] = p.multi_query_spec or {}

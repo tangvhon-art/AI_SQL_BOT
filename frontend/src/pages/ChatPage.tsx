@@ -41,6 +41,12 @@ export default function ChatPage() {
   const [saving, setSaving] = useState(false)
   const saveMsgRef = useRef<ChatMsg | null>(null)
   const saveInputRef = useRef<InputRef>(null)
+  // ========== 保存至报告中心 ==========
+  const [reportOpen, setReportOpen] = useState(false)
+  const [reportName, setReportName] = useState('')
+  const [reportSaving, setReportSaving] = useState(false)
+  const reportMsgRef = useRef<ChatMsg | null>(null)
+  const reportInputRef = useRef<InputRef>(null)
   const {
     conversations, currentConvId, messages, streaming, stage,
     setConversations, setCurrentConvId, setMessages, appendUser, appendStreamMsg, setStreaming, setStage,
@@ -636,6 +642,49 @@ export default function ChatPage() {
     }
   }
 
+  // ========== 保存至报告中心（多查询 Dashboard 结果）==========
+  const handleSaveReport = (msg: ChatMsg) => {
+    const content = (msg.content ?? {}) as Record<string, unknown>
+    if (!content.dashboard) {
+      msgApi.warning('该消息无可保存的分析结果')
+      return
+    }
+    reportMsgRef.current = msg
+    const original = String(content.original_question ?? content.question ?? '')
+    setReportName(original ? `${original.slice(0, 30)} 分析报告` : `问数报告 ${new Date().toLocaleString()}`)
+    setReportOpen(true)
+  }
+
+  const submitReport = async () => {
+    const msg = reportMsgRef.current
+    const title = reportName.trim()
+    if (!msg || !title) return
+    const content = (msg.content ?? {}) as Record<string, unknown>
+    if (!content.dashboard) {
+      msgApi.warning('该消息无可保存的分析结果')
+      setReportOpen(false)
+      return
+    }
+    setReportSaving(true)
+    try {
+      await client.post('/reports', {
+        title,
+        original_question: String(content.original_question ?? content.question ?? ''),
+        multi_query_spec: (content.multi_spec as Record<string, unknown>) ?? {},
+        dashboard_data: (content.dashboard as Record<string, unknown>) ?? {},
+        ai_interpretation: (content.ai_interpretation as Record<string, unknown>) ?? {},
+        interpretation_text: String((content.ai_interpretation as Record<string, unknown>)?.summary ?? ''),
+        remark: '',
+      })
+      msgApi.success('已保存至报告中心')
+      setReportOpen(false)
+    } catch (e) {
+      toastError(e)
+    } finally {
+      setReportSaving(false)
+    }
+  }
+
   const feedback = async (_msgId: number | undefined, fb: string) => {
     msgApi.success(fb === 'good' ? '感谢反馈' : '已记录反馈')
   }
@@ -937,6 +986,33 @@ export default function ChatPage() {
         />
       </Modal>
 
+      {/* ---------- 保存至报告中心弹窗 ---------- */}
+      <Modal
+        title="保存至报告中心"
+        open={reportOpen}
+        onOk={submitReport}
+        onCancel={() => setReportOpen(false)}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={reportSaving}
+        okButtonProps={{ disabled: !reportName.trim() }}
+        afterOpenChange={(open) => { if (open) reportInputRef.current?.focus() }}
+        width={420}
+      >
+        <div style={{ marginBottom: 8, fontWeight: 500 }}>报告名称：</div>
+        <Input
+          ref={reportInputRef}
+          value={reportName}
+          onChange={(e) => setReportName(e.target.value)}
+          placeholder="请输入报告名称"
+          maxLength={100}
+          onPressEnter={submitReport}
+        />
+        <div style={{ marginTop: 8, fontSize: 12, color: 'rgba(0,0,0,.45)' }}>
+          保存后可在左侧导航「报告中心」查看和复用
+        </div>
+      </Modal>
+
       {/* ---------- 主体：空会话整体居中 / 有消息时消息在上输入框贴底 ---------- */}
       {messages.length === 0 ? (
         <div style={{
@@ -962,6 +1038,7 @@ export default function ChatPage() {
                   onMultiConfirm={handleMultiConfirm}
                   onRetryCard={handleRetryCard}
                   onCancelMulti={handleCancelMulti}
+                  onSaveReport={handleSaveReport}
                   retryDisabled={retryDisabled}
                 />
               ))}

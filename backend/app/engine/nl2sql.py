@@ -142,7 +142,8 @@ LIMIT 分页参数;
 12. 过滤条件优先走索引：时间范围过滤用 `时间列 >= 起点 AND 时间列 < 终点`（左闭右开，可走索引），**禁止**用 `BETWEEN ... AND ...` 表示时间范围（闭区间含端点，与左闭右开口径冲突）；相对时间的起点/终点用 CURDATE()/NOW() + DATE_SUB/DATE_ADD 推导，日期函数放在常量侧，不要在时间列上套函数；状态过滤用 状态列 = 值
 13. **时间过滤必须用左闭右开区间**：查询"今天"用 `时间列 >= CURDATE() AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`；查询"昨天"用 `时间列 >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND 时间列 < CURDATE()`；查询指定日期"9月4日"用 `时间列 >= '2026-09-04 00:00:00' AND 时间列 < '2026-09-05 00:00:00'`；**禁止** `BETWEEN '2026-09-04' AND '2026-09-04'`（同日闭区间两端都是 0 点，会漏掉全天数据）；禁止 `= '2026-09-04'`（只匹配 0 点整）
 14. **子查询过滤必须用 IN**：按名称模糊匹配项目/实体再取其 ID 过滤时，禁止 `x = (SELECT id FROM ... WHERE name LIKE ...)`（可能返回多行报 1242），必须写 `x IN (SELECT id FROM ... WHERE name LIKE ...)`
-15. **禁止对 ID/外键类字段做聚合**：id、*_id 结尾字段（主键/外键，如 project_id、req_id、api_id）只用于关联、过滤、分组，**禁止** SUM/AVG/MAX/MIN(project_id) 这类无意义聚合；聚合函数只允许作用于数值业务指标（金额/数量/时长/次数/比率/大小等）。「按X项目」「查X项目/项目下的Y」是维度筛选（WHERE 项目名 LIKE + GROUP BY 项目名/名称列），不是对项目ID求和"""
+15. **禁止对 ID/外键类字段做聚合**：id、*_id 结尾字段（主键/外键，如 project_id、req_id、api_id）只用于关联、过滤、分组，**禁止** SUM/AVG/MAX/MIN(project_id) 这类无意义聚合；聚合函数只允许作用于数值业务指标（金额/数量/时长/次数/比率/大小等）。「按X项目」「查X项目/项目下的Y」是维度筛选（WHERE 项目名 LIKE + GROUP BY 项目名/名称列），不是对项目ID求和
+16. **不得自行脑补过滤条件**：WHERE / HAVING 条件必须严格来自用户问题中**明确声明**的筛选要求（如"状态=已通过"、"近7日"、"项目名包含X"等）；**禁止**自行添加用户未提及的过滤条件（如 `status = 1`、`is_active = 1`、`type = 'xxx'`、部门/人员限制等），即使字段注释暗示了业务含义或"看起来应该过滤"。若用户问题未提及某字段，则该字段不得出现在 WHERE / HAVING 中（软删 `is_deleted = 0` 按规则 7 自动处理，不在此限）；时间范围仅在用户明确提及时添加（如"近7日"、"今天"、"9月"）"""
 
 
 def _schema_text(datasource_id: int, top_tables: list[TableMeta] | None = None,
@@ -758,6 +759,45 @@ def _count_shape_error(sql: str, spec_context: dict | None) -> str | None:
     return None
 
 
+def _unexpected_filter_error(sql: str, question: str) -> str | None:
+    """检测 WHERE 中用户问题未提及的常见脑补过滤字段（status/is_active/type 等）。
+    防止 LLM 自行添加业务含义过滤（如 status=1 仅统计已结束），用户未声明即不得过滤。
+    软删字段 is_deleted 按规则 7 自动注入，在此豁免。"""
+    import sqlglot
+    import sqlglot.expressions as exp
+    try:
+        ast = sqlglot.parse_one(sql, read="mysql")
+    except Exception:  # noqa: BLE001
+        return None
+    where = ast.find(exp.Where)
+    if not where:
+        return None
+    col_names = set()
+    for col in where.find_all(exp.Column):
+        name = (col.name or "").lower()
+        if name:
+            col_names.add(name)
+    # 软删字段豁免（规则 7 自动注入）
+    col_names.discard("is_deleted")
+    col_names.discard("deleted")
+    # 常见脑补字段 → 用户问题中应出现的中文关键词（不含"发起"，避免"发起量"误豁免）
+    suspect: dict[str, list[str]] = {
+        "status": ["状态", "已结束", "处理中", "未通过", "撤销", "完成", "待审", "审批中", "通过", "驳回", "已办", "待办"],
+        "state": ["状态", "已结束", "处理中", "完成"],
+        "is_active": ["有效", "启用", "在用", "无效", "停用", "激活"],
+        "is_valid": ["有效", "无效", "合法", "校验"],
+        "type": ["类型", "类别"],
+        "category": ["分类", "类别"],
+        "level": ["级别", "等级", "优先级"],
+    }
+    for field, keywords in suspect.items():
+        if field in col_names and not any(kw in question for kw in keywords):
+            return (f"SQL 的 WHERE 中包含用户问题未提及的过滤字段 `{field}`。"
+                    f"用户问题未要求按此字段筛选，请移除该条件；"
+                    f"若确实需要，请在问题中明确说明（如「状态=已结束」）。")
+    return None
+
+
 def _clean_alias(comment: str) -> str:
     """别名清洗：只取字段主名，去掉注释中的枚举/取值说明。
     例：「项目ID（NULL=全局，预留项目级）」→「项目ID」；「状态：pending-等待」→「状态」。"""
@@ -1227,6 +1267,9 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
             shape_err = _count_shape_error(sql, spec_context)
             if shape_err:
                 raise ValueError(shape_err)
+            filter_err = _unexpected_filter_error(sql, question)
+            if filter_err:
+                raise ValueError(filter_err)
             sql = _apply_column_aliases(sql, datasource_id)
             yield {"type": "result", "result": {
                 "intent": "query", "sql": sql,
@@ -1630,6 +1673,9 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
             shape_err = _count_shape_error(sql, spec_context)
             if shape_err:
                 raise ValueError(shape_err)
+            filter_err = _unexpected_filter_error(sql, question)
+            if filter_err:
+                raise ValueError(filter_err)
             sql = _apply_column_aliases(sql, datasource_id)
             yield {"type": "result", "result": {
                 "intent": "query", "sql": sql,
