@@ -17,7 +17,6 @@ import RolePage from './pages/RolePage'
 import GroupPage from './pages/GroupPage'
 import UserPage from './pages/UserPage'
 import EvalPage from './pages/EvalPage'
-import LineagePage from './pages/LineagePage'
 import ScenesPage from './pages/ScenesPage'
 import CachePage from './pages/CachePage'
 import SysConfigPage from './pages/SysConfigPage'
@@ -46,7 +45,6 @@ function Shell() {
           <Route path="/users" element={<UserPage />} />
           <Route path="/permissions" element={<PermissionPage />} />
           <Route path="/eval" element={<EvalPage />} />
-          <Route path="/lineage" element={<LineagePage />} />
           <Route path="/scenes" element={<ScenesPage />} />
           <Route path="/cache" element={<CachePage />} />
           <Route path="/sys-config" element={<SysConfigPage />} />

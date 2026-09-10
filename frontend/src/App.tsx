@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react'
 import { Avatar, Breadcrumb, Dropdown, Layout, Menu, Space, Tag, Typography } from 'antd'
 import {
   ApiOutlined, AppstoreOutlined, AuditOutlined, CommentOutlined, ControlOutlined, DatabaseOutlined,
-  DownOutlined, ExperimentOutlined, FileTextOutlined, ForkOutlined, LogoutOutlined,
+  DownOutlined, ExperimentOutlined, FileTextOutlined, LogoutOutlined,
   RobotOutlined, SafetyCertificateOutlined, ScheduleOutlined, SettingOutlined,
   TeamOutlined, ThunderboltOutlined, UsergroupAddOutlined, UserOutlined,
 } from '@ant-design/icons'
@@ -41,7 +41,6 @@ const MENU: MenuProps['items'] = [
     key: 'cap', icon: <ExperimentOutlined />, label: '能力增强',
     children: [
       { key: '/eval', icon: <ExperimentOutlined />, label: '评测中心' },
-      { key: '/lineage', icon: <ForkOutlined />, label: '血缘图谱' },
       { key: '/scenes', icon: <AppstoreOutlined />, label: '场景模板' },
       { key: '/cache', icon: <ThunderboltOutlined />, label: '缓存管理' },
       { key: '/sys-config', icon: <ControlOutlined />, label: '系统配置' },
@@ -64,7 +63,6 @@ const CRUMB_MAP: Record<string, { title: string; extra?: string }> = {
   '/models': { title: '模型配置', extra: 'OpenAI 兼容 LLM 与 Embedding' },
   '/audit': { title: '审计日志', extra: '问数全链路留痕（含权限注入类型）' },
   '/eval': { title: '评测中心', extra: '评测用例管理、批次执行与指标报告（C4 评测闭环）' },
-  '/lineage': { title: '血缘图谱', extra: '表/字段血缘查询与手动挖掘（C8 血缘）' },
   '/scenes': { title: '场景模板', extra: '六大场景模板包管理与场景识别测试（C14）' },
   '/cache': { title: '缓存管理', extra: 'SQL 生成缓存 / 结果缓存统计与清理（C1）' },
   '/sys-config': { title: '系统配置', extra: '成本门槛 / 限流超时 / 样例值采集等能力参数（DB 覆盖即时生效）' },
@@ -83,7 +81,7 @@ export default function App() {
   const parentOf = (s: string): string | undefined => {
     if (['/datasources', '/datasources/:id/schema', '/knowledge'].includes(s)) return 'data'
     if (['/roles', '/groups', '/users', '/permissions', '/models', '/prompts', '/audit'].includes(s)) return 'sys'
-    if (['/eval', '/lineage', '/scenes', '/cache', '/sys-config', '/reports', '/insight'].includes(s)) return 'cap'
+    if (['/eval', '/scenes', '/cache', '/sys-config', '/reports', '/insight'].includes(s)) return 'cap'
     return undefined
   }
   const defaultOpen = parentOf(selected)

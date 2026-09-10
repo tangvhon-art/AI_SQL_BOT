@@ -26,9 +26,6 @@ SECTIONS: dict[str, list[str]] = {
                    "query_timeout_ms"],
     "schema_sync": ["schema_sync_collect_samples", "schema_sync_sample_per_column",
                     "schema_sync_sample_min_rows", "schema_sync_sample_timeout_s"],
-    "lineage": ["lineage_collect_enabled", "lineage_ddl_interval_min",
-                "lineage_mine_interval_min", "lineage_max_depth",
-                "lineage_parse_timeout_s"],
     "eval": ["eval_mock_execute"],
 }
 

@@ -264,28 +264,6 @@ export interface EvalResultItem {
   detail: Record<string, unknown>
 }
 
-/** C8 血缘图（ECharts graph 结构） */
-export interface LineageGraph {
-  nodes: Array<{
-    id: string
-    name: string
-    table_id?: number
-    category?: number
-    source?: string
-    value?: string
-  }>
-  edges: Array<{
-    source: string
-    target: string
-    label?: string
-    src_col?: string
-    dst_col?: string
-    source_type?: string
-    confidence?: number
-  }>
-  root?: string
-}
-
 /** 系统配置分组（键为 config 字段名） */
 export interface SystemConfigResp {
   sections: Record<string, Record<string, unknown>>

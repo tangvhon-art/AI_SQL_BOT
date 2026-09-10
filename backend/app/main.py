@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api import (ai_interpret, audit, auth, cache, chat, chat_multi, datasources,
                   dicts, doc_chat_api, eval as eval_api, insight, knowledge,
-                  lineage, models_config, org, permissions, prompts, reports,
+                  models_config, org, permissions, prompts, reports,
                   scenes, scheduled_tasks, system_config)
 from .config import get_settings
 from .database import init_db
@@ -46,7 +46,6 @@ app.include_router(org.router, prefix=API_PREFIX)
 # 能力补建路由（C1/C4/C8/C14/系统配置）
 app.include_router(cache.router, prefix=API_PREFIX)
 app.include_router(eval_api.router, prefix=API_PREFIX)
-app.include_router(lineage.router, prefix=API_PREFIX)
 app.include_router(scenes.router, prefix=API_PREFIX)
 app.include_router(system_config.router, prefix=API_PREFIX)
 app.include_router(prompts.router, prefix=API_PREFIX)

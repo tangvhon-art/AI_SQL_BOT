@@ -63,16 +63,6 @@ const SECTIONS_META: Array<{ section: string; title: string; desc: string; field
     ],
   },
   {
-    section: 'lineage', title: 'C8 血缘', desc: '血缘挖掘调度与解析参数',
-    fields: [
-      { key: 'lineage_collect_enabled', label: '启用血缘采集', type: 'bool' },
-      { key: 'lineage_ddl_interval_min', label: '视图 DDL 挖掘周期', type: 'int', unit: '分钟' },
-      { key: 'lineage_mine_interval_min', label: '查询日志挖掘周期', type: 'int', unit: '分钟' },
-      { key: 'lineage_max_depth', label: '血缘最大深度', type: 'int' },
-      { key: 'lineage_parse_timeout_s', label: 'DDL 解析超时', type: 'float', unit: '秒' },
-    ],
-  },
-  {
     section: 'eval', title: 'C4 评测', desc: '评测批次执行模式',
     fields: [
       { key: 'eval_mock_execute', label: '默认 Mock 执行', type: 'bool', hint: '开启时不实连业务库执行' },
