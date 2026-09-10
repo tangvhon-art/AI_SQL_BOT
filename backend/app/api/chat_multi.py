@@ -311,10 +311,11 @@ def _run_confirm_sync(body: MultiConfirmIn, sub_specs: list[SubQuerySpec],
         elif isinstance(r, Exception):
             card = {"sub_id": sub.sub_id, "title": sub.title or sub.question[:30],
                     "chart_type": sub.chart_hint or "bar",
-                    "status": "error", "error": str(r)}
+                    "status": "error", "error": str(r), "retryable": True}
         else:
             card = {"sub_id": sub.sub_id, "title": sub.title or sub.question[:30],
-                    "chart_type": sub.chart_hint or "bar", "status": "cancelled"}
+                    "chart_type": sub.chart_hint or "bar",
+                    "status": "cancelled", "retryable": False}
         card["sub_spec"] = sub.to_dict()   # 落库：单卡重试定位用
         cards.append(card)
 

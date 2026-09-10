@@ -14,6 +14,10 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 
+class SubQueryNonSqlError(Exception):
+    """N2 返回非 SQL 结果（clarify/knowledge/chat/refuse）：重试无意义，直接失败隔离。"""
+
+
 @dataclass
 class SubTaskResult:
     """单个子查询的执行结果（编排器 / 持久化 / 前端卡片共用）。"""
@@ -28,6 +32,7 @@ class SubTaskResult:
     interpretation: str = ""
     sql: str = ""
     error: str = ""
+    retryable: bool = True         # clarify 等非查询失败不可重试
 
     def to_card(self) -> dict:
         """转为 dashboard 卡片数据（落库 + 事件载荷）。"""
@@ -43,6 +48,7 @@ class SubTaskResult:
             "interpretation": self.interpretation,
             "status": self.status,
             "error": self.error,
+            "retryable": self.retryable,
         }
 
 
@@ -94,6 +100,9 @@ def run_subtask_pipeline(sub: Any, ctx: SubTaskContext) -> SubTaskResult:
         if not sql:
             raise RuntimeError("未生成 SQL（LLM 返回为空或 clarify）")
         out.sql = sql
+    except SubQueryNonSqlError as exc:
+        logger.warning("[子查询][%s] N2 非查询意图（不可重试）: %s", sub_id, exc)
+        return _fail(ctx, sub, out, f"无法生成 SQL：{exc}", retryable=False)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[子查询][%s] N2 生成失败: %s", sub_id, exc)
         return _fail(ctx, sub, out, f"SQL 生成失败: {exc}")
@@ -160,11 +169,13 @@ def run_subtask_pipeline(sub: Any, ctx: SubTaskContext) -> SubTaskResult:
     return out
 
 
-def _fail(ctx: SubTaskContext, sub: Any, out: SubTaskResult, msg: str) -> SubTaskResult:
+def _fail(ctx: SubTaskContext, sub: Any, out: SubTaskResult, msg: str,
+          retryable: bool = True) -> SubTaskResult:
     out.status = "error"
     out.error = msg
+    out.retryable = retryable
     ctx.emit("sub_error", {"sub_id": sub.sub_id, "error": msg,
-                           "retryable": True, "stage": "pipeline"})
+                           "retryable": retryable, "stage": "pipeline"})
     return out
 
 
@@ -234,11 +245,20 @@ def _generate_sql_with_retry(sub: Any, ctx: SubTaskContext) -> str:
             sql, intent = _extract_sql_from_result(result)
             if sql:
                 return sql
+            # 非查询意图（clarify/knowledge/chat/refuse）：重试无意义，抛专用异常供上层标记不可重试
+            if intent in ("clarify", "knowledge", "chat", "refuse"):
+                explain = result.get("explain") if isinstance(result, dict) else ""
+                raise SubQueryNonSqlError(
+                    f"{intent}: {explain or '该问题无法自动生成查询 SQL，请换种问法或补充表/字段信息'}")
             last_error = intent or (f"result 为空（生成器返回 {type(result).__name__}）"
                                     if result is not None else "result 为空")
+        except SubQueryNonSqlError:
+            # 非查询意图（不可重试）：向上传播，由流水线 N2 捕获并标记 retryable=False
+            raise
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
-        logger.warning("[子查询][%s] N2 第 %d 次生成失败: %s", sub.sub_id, attempt, last_error)
+        logger.warning("[子查询][%s] N2 第 %d 次生成失败: %s",
+                       sub.sub_id, attempt, last_error, exc_info=True)
         if _check_cancelled(ctx, "N2"):
             return ""
     raise RuntimeError(last_error or "SQL 生成失败")
@@ -266,7 +286,8 @@ def _execute_with_retry(sub: Any, ctx: SubTaskContext, sql: str) -> tuple[dict, 
             last_error = str(exc)
             if attempt < max_attempts:
                 logger.warning("[子查询][%s] N4 执行失败（第 %d/%d 次），自动修正: %s",
-                               sub.sub_id, attempt, max_attempts, last_error[:200])
+                               sub.sub_id, attempt, max_attempts, last_error[:200],
+                               exc_info=True)
                 ctx.emit("sub_progress", {"sub_id": sub.sub_id, "stage": "execute_retry",
                                           "msg": f"执行失败，自动重试（{attempt + 1}/{max_attempts}）…"})
                 if ctx.llm is not None:

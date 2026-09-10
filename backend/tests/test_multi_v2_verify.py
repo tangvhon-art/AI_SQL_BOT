@@ -172,20 +172,38 @@ def main():
     assert sql == "" and intent == ""
     print("[7] N2 result 载荷兼容（dict/str/None）✓")
 
-    # ---- 8. 真实降级路径：LLM 不可用（client 未配置）→ generate_sql_stream 返回 str mock → 不崩溃 ----
+    # ---- 8. 真实降级路径：LLM 不可用（client 未配置）→ generate_sql_stream 返回非 SQL → 隔离不崩溃 ----
     ctx8, _, events8 = make_ctx(delay=0.01)
     ctx8.llm = None
     ctx8.generate_sql = None            # 走真实 nl2sql 路径
-    ctx8.datasource_id = 1              # 本机元数据库（mock SQL 可产出）
+    ctx8.datasource_id = 1              # 本机元数据库（无业务表 → refuse）
     spec8 = make_specs(1)[0]
     spec8.schema_name = "AI_Infra"
     res8 = run_subtask_pipeline(spec8, ctx8)
-    assert res8.status in ("success", "error"), f"不应崩溃，状态: {res8.status}"
-    if res8.status == "success":
-        assert res8.sql, "str mock 应产出 SQL"
-        print(f"[8] LLM 不可用降级路径: status=success sql={res8.sql[:40]}… ✓")
+    assert res8.status == "error", f"无表可查应 error: {res8.status}"
+    assert res8.retryable is False, "非查询意图应不可重试"
+    assert "无法生成 SQL" in res8.error, f"错误应含可读原因: {res8.error}"
+    err_ev8 = [e for e in events8 if e[0] == "sub_error"]
+    assert err_ev8 and err_ev8[-1][1].get("retryable") is False, "sub_error 事件应带 retryable=False"
+    print(f"[8] LLM 不可用/非查询降级: error={res8.error[:50]}… retryable=False ✓")
+
+    # ---- 9. clarify 载荷（选表歧义）同样不可重试且带候选 ----
+    ctx9, _, events9 = make_ctx(delay=0.01)
+    ctx9.llm = None
+    ctx9.generate_sql = None
+    ctx9.datasource_id = 2              # 会议室库（部分问题触发选表歧义/澄清）
+    # 真实 nl2sql 产出的 SQL 不含 t_ 前缀，重写 mock 执行器避免 split 越界
+    ctx9.run_query_cached = lambda sql, *a: {"columns": ["x"], "rows": [["y"]],
+                                              "row_count": 1, "latency_ms": 1, "permission": "1=1"}
+    spec9 = make_specs(1)[0]
+    spec9.schema_name = "fs_zoommeeting"
+    spec9.question = "分析会议室使用情况"   # 宽泛问题更易触发 clarify/歧义
+    res9 = run_subtask_pipeline(spec9, ctx9)
+    if res9.status == "error":
+        assert res9.retryable is False
+        print(f"[9] clarify/歧义降级: error={res9.error[:60]}… retryable=False ✓")
     else:
-        print(f"[8] LLM 不可用降级路径: status=error（{res8.error[:60]}）——已隔离不崩溃 ✓")
+        print(f"[9] 该问题未触发 clarify（status={res9.status}，正常产出 SQL）✓")
 
     print("\n" + ("=== 全部通过 ===" if ok else "=== 存在未通过项 ==="))
     sys.exit(0 if ok else 1)

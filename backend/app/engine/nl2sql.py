@@ -1142,8 +1142,14 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
         while True:
             try:
                 chunk = next(stream_gen)
-                c_delta = chunk.get("content", "")
-                r_delta = chunk.get("reasoning", "")
+                # 兼容多种 chunk 载荷：dict（content/reasoning）或纯文本 str（部分 SDK 直出 delta）
+                if isinstance(chunk, dict):
+                    c_delta = chunk.get("content", "")
+                    r_delta = chunk.get("reasoning", "")
+                elif isinstance(chunk, str):
+                    c_delta, r_delta = chunk, ""
+                else:
+                    c_delta, r_delta = str(chunk), ""
                 content += c_delta
                 if r_delta:
                     yield {"type": "thinking", "delta": r_delta}
@@ -1539,8 +1545,14 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
         while True:
             try:
                 chunk = next(stream_gen)
-                c_delta = chunk.get("content", "")
-                r_delta = chunk.get("reasoning", "")
+                # 兼容多种 chunk 载荷：dict（content/reasoning）或纯文本 str（部分 SDK 直出 delta）
+                if isinstance(chunk, dict):
+                    c_delta = chunk.get("content", "")
+                    r_delta = chunk.get("reasoning", "")
+                elif isinstance(chunk, str):
+                    c_delta, r_delta = chunk, ""
+                else:
+                    c_delta, r_delta = str(chunk), ""
                 content += c_delta
                 if r_delta:
                     yield {"type": "thinking", "delta": r_delta}
