@@ -75,7 +75,7 @@ def list_templates(keyword: str = "", db: Session = Depends(get_db), user=Depend
     items = q.order_by(InsightTemplate.id.desc()).all()
     return {"ok": True, "items": [{"id": t.id, "name": t.name, "description": t.description,
                                      "purpose": t.purpose, "datasource_id": t.datasource_id,
-                                     "config": t.config, "created_at": t.created_at.isoformat() if t.created_at else None}
+                                     "config": t.config, "created_at": t.create_time.isoformat() if t.create_time else None}
                                     for t in items]}
 
 

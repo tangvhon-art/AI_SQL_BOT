@@ -60,7 +60,7 @@ def update_prompt(prompt_id: int, body: PromptUpdate,
     svc = PromptService(db, workspace_id=user.workspace_id)
     p = svc.update(prompt_id, **body.model_dump(exclude_none=True))
     if not p:
-        raise HTTPException(404, "模板不存在或为内置模板不可修改")
+        raise HTTPException(404, "模板不存在")
     return {"ok": True, "item": _to_dict(p)}
 
 
@@ -68,7 +68,7 @@ def update_prompt(prompt_id: int, body: PromptUpdate,
 def delete_prompt(prompt_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
     svc = PromptService(db, workspace_id=user.workspace_id)
     if not svc.delete(prompt_id):
-        raise HTTPException(404, "模板不存在或为内置模板不可删除")
+        raise HTTPException(404, "模板不存在")
     return {"ok": True}
 
 
@@ -113,5 +113,5 @@ def _to_dict(p) -> dict:
         "is_builtin": p.is_builtin,
         "sort_order": p.sort_order,
         "created_by": p.created_by,
-        "created_at": p.created_at.isoformat() if p.created_at else None,
+        "created_at": p.create_time.isoformat() if p.create_time else None,
     }

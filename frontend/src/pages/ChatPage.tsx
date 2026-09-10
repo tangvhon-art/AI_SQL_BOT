@@ -33,6 +33,8 @@ export default function ChatPage() {
   const [schemaName, setSchemaName] = useState<string | null>(null)
   const [modelList, setModelList] = useState<Array<{ id: number; name: string; model_name: string; is_default: boolean; scene: string }>>([])
   const [modelId, setModelId] = useState<number | null>(null)
+  // AI解读可选提示词（scene_type=ai_interpret，来自 Prompt 管理）
+  const [promptList, setPromptList] = useState<Array<{ id: number; name: string; is_default: boolean }>>([])
   const [histOpen, setHistOpen] = useState(false)
 
   // ========== 保存为查询（AntD Modal 代替原生 prompt）==========
@@ -189,6 +191,10 @@ export default function ChatPage() {
         const def = sqlModels.find((m) => m.is_default) || sqlModels[0]
         if (def) setModelId(def.id)
       })
+      .catch(() => {})
+    // 加载 AI解读 提示词列表（Prompt 管理中 scene_type=ai_interpret）
+    client.get<{ items: Array<{ id: number; name: string; is_default: boolean }> }>('/prompts', { params: { scene_type: 'ai_interpret' } })
+      .then((r) => setPromptList(r.data.items || []))
       .catch(() => {})
     // 切换页面回来时：若有当前会话且不在流式输出中，重新加载最新消息（避免全局 store 残留错位状态）
     if (currentConvId && !streaming) {
@@ -685,6 +691,15 @@ export default function ChatPage() {
     }
   }
 
+  // 该条消息对应的原始问题：取消息流中最近一条用户消息文本（AI 解读入参）
+  const msgQuestion = (i: number) => {
+    for (let j = i - 1; j >= 0; j--) {
+      const u = messages[j]
+      if (u.role === 'user') return String(((u.content ?? {}) as Record<string, unknown>).text ?? '')
+    }
+    return ''
+  }
+
   const feedback = async (_msgId: number | undefined, fb: string) => {
     msgApi.success(fb === 'good' ? '感谢反馈' : '已记录反馈')
   }
@@ -1030,6 +1045,9 @@ export default function ChatPage() {
                 <MessageCard
                   key={m.id ?? `msg-${i}`}
                   msg={m}
+                  index={i}
+                  question={msgQuestion(i)}
+                  prompts={promptList}
                   onSaveQuery={saveQuery}
                   onFeedback={feedback}
                   onClarifyConfirm={(tables) => {

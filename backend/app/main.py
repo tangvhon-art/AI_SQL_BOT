@@ -4,10 +4,10 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import (audit, auth, cache, chat, chat_multi, datasources, dicts,
-                  doc_chat_api, eval as eval_api, insight, knowledge, lineage,
-                  models_config, org, permissions, prompts, reports, scenes,
-                  scheduled_tasks, system_config)
+from .api import (ai_interpret, audit, auth, cache, chat, chat_multi, datasources,
+                  dicts, doc_chat_api, eval as eval_api, insight, knowledge,
+                  lineage, models_config, org, permissions, prompts, reports,
+                  scenes, scheduled_tasks, system_config)
 from .config import get_settings
 from .database import init_db
 from .engine.scheduler import start_scheduler, stop_scheduler
@@ -52,6 +52,7 @@ app.include_router(system_config.router, prefix=API_PREFIX)
 app.include_router(prompts.router, prefix=API_PREFIX)
 app.include_router(reports.router, prefix=API_PREFIX)
 app.include_router(insight.router, prefix=API_PREFIX)
+app.include_router(ai_interpret.router, prefix=API_PREFIX)
 
 
 @app.on_event("startup")

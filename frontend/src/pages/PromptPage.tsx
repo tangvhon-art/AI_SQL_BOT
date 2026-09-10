@@ -108,8 +108,8 @@ export default function PromptPage() {
     { title: '操作', key: 'actions', width: 200, render: (_: any, r: PromptItem) => (
       <Space size={4}>
         {!r.is_default && <Button size="small" type="link" onClick={() => handleSetDefault(r.id)}>设默认</Button>}
-        {!r.is_builtin && <Button size="small" type="link" icon={<EditOutlined />} onClick={() => handleEdit(r)}>编辑</Button>}
-        {!r.is_builtin && <Popconfirm title="确认删除？" onConfirm={() => handleDelete(r.id)}><Button size="small" type="link" danger icon={<DeleteOutlined />}>删除</Button></Popconfirm>}
+        <Button size="small" type="link" icon={<EditOutlined />} onClick={() => handleEdit(r)}>编辑</Button>
+        <Popconfirm title="确认删除？删除后该场景将不再使用此提示词。" onConfirm={() => handleDelete(r.id)}><Button size="small" type="link" danger icon={<DeleteOutlined />}>删除</Button></Popconfirm>
       </Space>
     )},
   ]

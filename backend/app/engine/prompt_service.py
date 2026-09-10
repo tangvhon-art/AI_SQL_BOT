@@ -89,9 +89,9 @@ class PromptService:
         return p
 
     def update(self, prompt_id: int, **fields) -> Prompt | None:
-        """更新模板（内置模板不可修改）。"""
+        """更新模板（内置模板同样允许编辑）。"""
         p = self.get(prompt_id)
-        if not p or p.is_builtin:
+        if not p:
             return None
         if fields.get("is_default") and not p.is_default:
             self.db.query(Prompt).filter(
@@ -107,9 +107,9 @@ class PromptService:
         return p
 
     def delete(self, prompt_id: int) -> bool:
-        """删除模板（内置模板不可删除）。"""
+        """删除模板（软删除，内置模板同样允许删除）。"""
         p = self.get(prompt_id)
-        if not p or p.is_builtin:
+        if not p:
             return False
         p.is_deleted = True
         self.db.commit()

@@ -1,7 +1,9 @@
 // 消息卡片：user 文本 / assistant 结果（四层结论+图表优先，SQL 默认收起）/ 进度 / 错误
 import { useState } from 'react'
-import { Alert, Button, Checkbox, Collapse, Descriptions, Space, Spin, Tag, Typography } from 'antd'
-import { LikeOutlined, DislikeOutlined, SaveOutlined } from '@ant-design/icons'
+import { Alert, Button, Checkbox, Collapse, Descriptions, Select, Space, Spin, Tag, Typography } from 'antd'
+import { LikeOutlined, DislikeOutlined, SaveOutlined, ThunderboltOutlined } from '@ant-design/icons'
+import { postSseStream } from '../api/sse'
+import { errMsg } from '../api/client'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { ChatMsg } from '../types'
@@ -16,10 +18,11 @@ import { useMultiQueryStore } from '../stores/multiQuery'
 import type { InterpretationResult, SubQuerySpec } from '../types/chart'
 
 // Dashboard + AI 解读组合块（V2：总览解读 + 单卡重试 + 保存报告）
-function DashboardBlock({ dashboard, aiInterpretation, aiLoading, onRetryCard, retryDisabled, onSaveReport }: {
+function DashboardBlock({ dashboard, aiInterpretation, aiLoading, interpretationTemplate, onRetryCard, retryDisabled, onSaveReport }: {
   dashboard: Record<string, unknown>
   aiInterpretation?: Record<string, unknown>
   aiLoading?: boolean
+  interpretationTemplate?: string
   onRetryCard?: (subId: string, confirmedTables?: string[]) => void
   retryDisabled?: (subId: string) => boolean
   onSaveReport?: () => void
@@ -39,7 +42,7 @@ function DashboardBlock({ dashboard, aiInterpretation, aiLoading, onRetryCard, r
       ) : null}
       <Dashboard data={data} showToolbar={false} onRetryCard={onRetryCard} retryDisabled={retryDisabled} />
       {(interpretation || aiLoading) && (
-        <AiInterpretation result={interpretation} loading={aiLoading} rawText={interpretation?.rawText} />
+        <AiInterpretation result={interpretation} loading={aiLoading} rawText={interpretation?.rawText} templateName={interpretationTemplate} />
       )}
       {onSaveReport && (
         <Space size={4} style={{ alignSelf: 'flex-end' }}>
@@ -68,6 +71,12 @@ interface Props {
   /** 多查询 V2：重试防抖 */
   retryDisabled?: (subId: string) => boolean
   multiCancelLoading?: boolean
+  /** 该消息在消息流中的下标（AI 解读结果写回消息内容用） */
+  index?: number
+  /** 该消息对应的原始问题（取上一个用户消息文本） */
+  question?: string
+  /** AI解读可选提示词列表（scene_type=ai_interpret） */
+  prompts?: Array<{ id: number; name: string; is_default: boolean }>
 }
 
 // AI 回复正文：Markdown 渲染（支持标题/列表/表格/代码块/引用）
@@ -251,8 +260,12 @@ function ClarifyCard({ text, candidates, originalQuestion, kind, onConfirm }: {
 export default function MessageCard({
   msg, onSaveQuery, onFeedback, onClarifyConfirm,
   onMultiConfirm, onRetryCard, onCancelMulti, retryDisabled, multiCancelLoading, onSaveReport,
+  index, question, prompts,
 }: Props) {
   const c = (msg.content ?? {}) as Record<string, unknown>
+  // AI 解读提示词选择（未选择时用场景默认提示词）
+  const [selPromptId, setSelPromptId] = useState<number | null>(null)
+  const effectivePromptId = selPromptId ?? prompts?.find((p) => p.is_default)?.id ?? null
   // 多查询 V2 状态（预览/执行进度由全局 store 驱动）
   const multiPhase = useMultiQueryStore((s) => s.phase)
   const preview = useMultiQueryStore((s) => s.preview)
@@ -362,6 +375,67 @@ export default function MessageCard({
     const anomalies = (c.anomalies ?? []) as Array<{ type: string; desc: string }>
     const querySpec = (c.query_spec ?? {}) as Record<string, unknown>
     const trace = (c.trace ?? {}) as Record<string, unknown>
+    // ===== AI 解读（点击触发，在卡片内流式展示；结果写回消息内容，保存报告可带上）=====
+    const dashboard = (c.dashboard ?? {}) as Record<string, unknown>
+    const canInterpret = !!(
+      Object.keys(dashboard).length || (columns.length > 0 && rows.length > 0)
+      || chart.type || chart.option
+    )
+    const runInterpret = async () => {
+      if (c.ai_interpretation_loading || index == null) return
+      const patch = (content: Record<string, unknown>) => {
+        const msgs = useChatStore.getState().messages
+        let idx = msgs.findIndex((m) => m === msg)
+        if (idx < 0) idx = index
+        if (idx >= 0 && idx < msgs.length) {
+          useChatStore.getState().patchMessage(idx, {
+            content_type: 'result',
+            content: content as never,
+          })
+        }
+      }
+      const data = Object.keys(dashboard).length
+        ? dashboard
+        : { columns, rows, chart, title: '查询结果' }
+      const fallbackQ = String((dashboard as { original_question?: string }).original_question ?? '')
+      patch({ ai_interpretation: null, ai_interpretation_loading: true, ai_interpretation_error: null })
+      try {
+        await postSseStream('/api/v1/ai/interpret', {
+          question: question ?? fallbackQ,
+          data,
+          prompt_template_id: effectivePromptId ?? undefined,
+        }, {
+          onAiInterpretationStart: (p) => patch({
+            ai_interpretation_template: String(p.template_name ?? ''),
+          }),
+          onAiInterpretation: (p) => patch({
+            ai_interpretation: { rawText: String(p.raw_text ?? '') },
+            ai_interpretation_loading: true,
+            ai_interpretation_error: null,
+          }),
+          onAiInterpretationDone: (p) => {
+            const res = (p as { result?: InterpretationResult }).result
+            patch({
+              ai_interpretation: res ?? {},
+              ai_interpretation_loading: false,
+              ai_interpretation_error: null,
+            })
+          },
+          onAiInterpretationError: (p) => patch({
+            ai_interpretation_loading: false,
+            ai_interpretation_error: String(p.error ?? '解读失败'),
+          }),
+          onError: (p) => patch({
+            ai_interpretation_loading: false,
+            ai_interpretation_error: String((p as { msg?: string }).msg ?? '解读失败'),
+          }),
+        })
+      } catch (e) {
+        patch({ ai_interpretation_loading: false, ai_interpretation_error: errMsg(e) })
+      }
+    }
+    const interpObj = (c.ai_interpretation ?? {}) as Record<string, unknown>
+    const interpError = c.ai_interpretation_error ? String(c.ai_interpretation_error) : ''
     // 多查询 V2：执行阶段 → 实时进度面板（store 驱动）；未确认预览 → 预览面板（上面已处理）
     if (multiPhase === 'executing' && !c.dashboard) {
       return (
@@ -474,10 +548,26 @@ export default function MessageCard({
             dashboard={c.dashboard as never}
             aiInterpretation={c.ai_interpretation as never}
             aiLoading={!!c.ai_interpretation_loading}
+            interpretationTemplate={String(c.ai_interpretation_template ?? '')}
             onRetryCard={onRetryCard}
             retryDisabled={retryDisabled}
             onSaveReport={() => onSaveReport?.(msg)}
           />
+        ) : null}
+        {/* AI 解读：错误提示（两种模式共用） */}
+        {interpError ? (
+          <Alert type="error" showIcon message={interpError} style={{ marginTop: 8 }} />
+        ) : null}
+        {/* AI 解读：单查询结果卡片内展示（dashboard 模式由 DashboardBlock 展示） */}
+        {!c.dashboard && (c.ai_interpretation_loading || c.ai_interpretation) ? (
+          <div style={{ marginTop: 8 }}>
+            <AiInterpretation
+              result={(c.ai_interpretation as InterpretationResult | undefined) ?? undefined}
+              loading={!!c.ai_interpretation_loading}
+              rawText={String(interpObj.rawText ?? '')}
+              templateName={String(c.ai_interpretation_template ?? '')}
+            />
+          </div>
         ) : null}
         {c.sql ? <SqlBlock sql={String(c.sql)} permission={String(c.permission ?? '')} /> : null}
         {/* 口径与溯源 */}
@@ -492,6 +582,28 @@ export default function MessageCard({
             >
               保存为查询
             </Button>
+          ) : null}
+          {canInterpret ? (
+            <Space size={4}>
+              <Select
+                size="small"
+                style={{ minWidth: 130 }}
+                placeholder="提示词（默认）"
+                value={effectivePromptId ?? undefined}
+                onChange={setSelPromptId}
+                options={(prompts ?? []).map((p) => ({ label: p.name, value: p.id }))}
+                allowClear
+              />
+              <Button
+                size="small"
+                type="text"
+                icon={<ThunderboltOutlined />}
+                loading={!!c.ai_interpretation_loading}
+                onClick={runInterpret}
+              >
+                AI解读
+              </Button>
+            </Space>
           ) : null}
           <Button size="small" type="text" icon={<LikeOutlined />} onClick={() => onFeedback?.(msg.id, 'good')} />
           <Button size="small" type="text" icon={<DislikeOutlined />} onClick={() => onFeedback?.(msg.id, 'bad')} />

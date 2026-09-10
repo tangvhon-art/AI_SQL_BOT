@@ -129,8 +129,8 @@ class AiInterpreter:
     # ---------- 内部方法 ----------
 
     def _llm_stream(self, prompt: str) -> Generator[str, None, None]:
-        """调用 LLM 流式接口，yield 增量文本。"""
-        messages = [{"role": "user", "content": prompt}]
+        """调用 LLM 流式接口，yield 增量文本。提示词作为 system prompt 下发。"""
+        messages = [{"role": "system", "content": prompt}]
         try:
             for chunk in self.llm.chat_stream(messages, temperature=0.3, thinking=False):
                 delta = chunk.get("content") or ""
