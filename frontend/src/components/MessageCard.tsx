@@ -11,6 +11,7 @@ import { Dashboard, convertDashboardEvent } from './dashboard/Dashboard'
 import MultiSpecPreview from './dashboard/MultiSpecPreview'
 import MultiExecProgress from './dashboard/MultiExecProgress'
 import { AiInterpretation } from './dashboard/AiInterpretation'
+import { useChatStore } from '../stores/chat'
 import { useMultiQueryStore } from '../stores/multiQuery'
 import type { InterpretationResult, SubQuerySpec } from '../types/chart'
 
@@ -19,7 +20,7 @@ function DashboardBlock({ dashboard, aiInterpretation, aiLoading, onRetryCard, r
   dashboard: Record<string, unknown>
   aiInterpretation?: Record<string, unknown>
   aiLoading?: boolean
-  onRetryCard?: (subId: string) => void
+  onRetryCard?: (subId: string, confirmedTables?: string[]) => void
   retryDisabled?: (subId: string) => boolean
 }) {
   const data = convertDashboardEvent(dashboard)
@@ -51,7 +52,7 @@ interface Props {
   /** 多查询 V2：确认执行（Phase A → B） */
   onMultiConfirm?: (subs: SubQuerySpec[]) => void
   /** 多查询 V2：单卡重试 */
-  onRetryCard?: (subId: string) => void
+  onRetryCard?: (subId: string, confirmedTables?: string[]) => void
   /** 多查询 V2：整体取消 */
   onCancelMulti?: () => void
   /** 多查询 V2：重试防抖 */
@@ -246,6 +247,9 @@ export default function MessageCard({
   const multiPhase = useMultiQueryStore((s) => s.phase)
   const preview = useMultiQueryStore((s) => s.preview)
   const confirmLoading = useMultiQueryStore((s) => s.confirmLoading)
+  // 全局 busy：拆解中 / 确认执行中 / 重试中 / 取消中 → 禁用所有可点击元素，防止重复点击
+  const streaming = useChatStore((s) => s.streaming)
+  const busy = streaming || confirmLoading || !!multiCancelLoading
 
   // Phase A 拆解预览面板（消息为 multi_preview 或恢复历史预览）
   const previewPayload = c.multi_spec as Record<string, unknown> | undefined
@@ -253,13 +257,19 @@ export default function MessageCard({
     const subs = (previewPayload?.sub_queries ?? []) as SubQuerySpec[]
     const list = subs.length ? subs : preview
     if (list.length) {
+      const specObj = c.query_spec as Record<string, unknown> | undefined
       return (
-        <MultiSpecPreview
-          subQueries={list}
-          confirming={confirmLoading}
-          onConfirm={(confirmed) => onMultiConfirm?.(confirmed)}
-          onCancel={onCancelMulti}
-        />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, margin: '10px 0', maxWidth: '100%' }}>
+          {/* 拆解结果后展示"我理解的问题"：原始问题 + 意图识别摘要（可纠错） */}
+          {specObj ? <SpecCard spec={specObj} /> : null}
+          <MultiSpecPreview
+            subQueries={list}
+            confirming={confirmLoading}
+            busy={busy}
+            onConfirm={(confirmed) => onMultiConfirm?.(confirmed)}
+            onCancel={onCancelMulti}
+          />
+        </div>
       )
     }
   }
@@ -349,6 +359,7 @@ export default function MessageCard({
           onRetryCard={onRetryCard}
           onCancelAll={onCancelMulti}
           cancelLoading={multiCancelLoading}
+          busy={busy}
         />
       )
     }

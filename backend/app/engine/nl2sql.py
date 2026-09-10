@@ -735,6 +735,26 @@ def _count_shape_error(sql: str, spec_context: dict | None) -> str | None:
     if not list(ast.find_all(exp.AggFunc)):
         return ("用户询问数量/计数（如 X数/多少次/总量），SQL 必须输出聚合查询："
                 "包含聚合函数 COUNT/SUM 并按分组字段 GROUP BY，禁止 SELECT 明细列 LIMIT n 的明细行查询")
+    # 无维度的纯聚合总量查询不应 GROUP BY（LLM 常误套排行模板 GROUP BY 1 ORDER BY 1 DESC LIMIT 1，
+    # MySQL 会报「Can't group on '别名'」）
+    dims = (spec_context.get("spec") or {}).get("dimensions") or []
+    if not dims and list(ast.find_all(exp.Group)):
+        projections = ast.expressions or []
+
+        def _is_agg_or_literal(e: Any) -> bool:
+            if isinstance(e, exp.AggFunc):
+                return True
+            if isinstance(e, exp.Alias) and isinstance(e.this, exp.AggFunc):
+                return True
+            if isinstance(e, exp.Literal):
+                return True
+            return False
+
+        if projections and all(_is_agg_or_literal(p) for p in projections):
+            return ("该问题为纯总量/计数查询（无分组维度），SQL 不应包含 GROUP BY："
+                    "直接 SELECT COUNT(*) / SUM(...) 即可；GROUP BY 聚合列会导致 "
+                    "MySQL 报错「Can't group on '别名'」或返回错误结果。"
+                    "若用户确实要按某维度分组，请在维度中明确该字段。")
     return None
 
 

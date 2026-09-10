@@ -2,9 +2,9 @@
  * Dashboard 容器：多查询结果汇总展示（V2：支持卡片执行中/错误/取消态 + 单卡重试 + 解读/异常/溯源）
  * 12栅格自动布局，支持 KPI 卡片 + 图表卡片混合
  */
-import React from 'react';
-import { Row, Col, Button, Space, Tooltip, Spin, Alert, Tag, Collapse, Typography, Descriptions } from 'antd';
-import { SaveOutlined, ReloadOutlined, RetweetOutlined } from '@ant-design/icons';
+import React, { useState } from 'react';
+import { Row, Col, Button, Space, Tooltip, Spin, Alert, Tag, Collapse, Typography, Descriptions, Checkbox } from 'antd';
+import { SaveOutlined, ReloadOutlined, RetweetOutlined, TableOutlined } from '@ant-design/icons';
 import { ChartCard } from './ChartCard';
 import { KpiCard, KpiGroupCard } from './KpiCard';
 import { recommendLayout } from '../../utils/layout-engine';
@@ -18,10 +18,12 @@ interface DashboardProps {
   onSaveReport?: () => void;
   onRefresh?: () => void;
   showToolbar?: boolean;
-  /** 单卡重试（error 卡片） */
-  onRetryCard?: (subId: string) => void;
+  /** 单卡重试（error 卡片）；澄清卡勾选表后带 confirmed_tables 重跑 */
+  onRetryCard?: (subId: string, confirmedTables?: string[]) => void;
   /** 重试防抖：返回当前是否可重试 */
   retryDisabled?: (subId: string) => boolean;
+  /** 全局 busy：拆解中/确认执行中/重试中/取消中 → 禁用所有操作按钮 */
+  busy?: boolean;
 }
 
 /**
@@ -60,6 +62,7 @@ export function convertDashboardEvent(event: any): DashboardData {
       status: (c.status || (c.data ? 'success' : 'loading')) as ChartCardConfig['status'],
       error: c.error,
       retryable: c.retryable,
+      clarifyCandidates: c.clarify_candidates,
       facts: c.facts,
       anomalies: c.anomalies,
       trace: c.trace,
@@ -124,7 +127,7 @@ function CardInsight({ card }: { card: ChartCardConfig }) {
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({
-  data, onSaveReport, onRefresh, showToolbar = true, onRetryCard, retryDisabled,
+  data, onSaveReport, onRefresh, showToolbar = true, onRetryCard, retryDisabled, busy,
 }) => {
   const layout = data.layout?.length ? data.layout : recommendLayout(data.cards);
 
@@ -168,6 +171,31 @@ export const Dashboard: React.FC<DashboardProps> = ({
           }}>
             <div style={{ fontSize: 13, fontWeight: 600 }}>{card.title}</div>
             <div style={{ fontSize: 12, marginTop: 2 }}>已取消</div>
+          </div>
+        </Col>
+      )
+    }
+    if (status === 'needs_clarify') {
+      const candidates = card.clarifyCandidates ?? []
+      return (
+        <Col key={card.id} span={24}>
+          <div style={{
+            border: '1px solid #F5E3C3', background: '#FFFCF5', borderRadius: 12, padding: '14px 18px',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              <TableOutlined style={{ color: '#B87A2A' }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 2 }}>{card.title}</div>
+                <div style={{ fontSize: 12, color: '#8c8c8c' }}>
+                  该子查询对应多张表，请勾选需要查询的表（可多选）后重新执行
+                </div>
+              </div>
+              <Tag color="warning" style={{ marginInlineEnd: 0 }}>待选表</Tag>
+            </div>
+            <ClarifyCheckboxGroup card={card} onRetry={onRetryCard} retryDisabled={retryDisabled} busy={busy} />
+            {candidates.length === 0 ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>未识别到候选表</Typography.Text>
+            ) : null}
           </div>
         </Col>
       )
@@ -293,3 +321,44 @@ export const Dashboard: React.FC<DashboardProps> = ({
     </div>
   );
 };
+
+/** 执行中澄清：候选表勾选 → 确认后带 confirmed_tables 重跑该子查询 */
+function ClarifyCheckboxGroup({
+  card, onRetry, retryDisabled, busy,
+}: {
+  card: ChartCardConfig
+  onRetry?: (subId: string, confirmedTables?: string[]) => void
+  retryDisabled?: (subId: string) => boolean
+  busy?: boolean
+}) {
+  const [checked, setChecked] = useState<string[]>([])
+  const candidates = card.clarifyCandidates ?? []
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }}>
+      {candidates.map((t) => (
+        <Checkbox
+          key={t.table}
+          checked={checked.includes(t.table)}
+          onChange={(e) => {
+            setChecked((prev) => (e.target.checked
+              ? [...prev, t.table]
+              : prev.filter((x) => x !== t.table)))
+          }}
+          style={{ fontSize: 12 }}
+        >
+          {t.table}
+          {t.comment ? <span style={{ color: '#8c8c8c', fontWeight: 400 }}>（{t.comment}）</span> : null}
+        </Checkbox>
+      ))}
+      {onRetry && card.subId ? (
+        <Button
+          size="small" type="primary" icon={<RetweetOutlined />}
+          disabled={checked.length === 0 || retryDisabled?.(card.subId)}
+          onClick={() => onRetry(card.subId!, checked)}
+        >
+          确认表并重跑
+        </Button>
+      ) : null}
+    </div>
+  )
+}

@@ -25,6 +25,26 @@ def _new_task_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+# 子问题前导连接词（逗号/标点拆解后残留，需清洗：如「以及流程发起占比…」「并分析…」）
+_SUB_LEAD_CONN = ("以及", "并且", "还有", "同时", "另外", "再然后", "然后", "并", "且", "再", "也")
+
+
+def _clean_sub_question(p: str) -> str:
+    """清洗拆解后的子问题：去前导连接词、重复查询动词、多余标点。"""
+    p = p.strip("，,。.；; \t")
+    for conn in _SUB_LEAD_CONN:
+        if p.startswith(conn):
+            p = p[len(conn):].lstrip("，,。.；; \t")
+            break
+    # 去重复查询动词（「查询近7日查询…」→「查询近7日…」）
+    for verb in ("查询", "统计", "分析", "查看"):
+        m = re.match(rf"^({verb}[^，,。]{0,10}?)({verb})", p)
+        if m:
+            p = m.group(1) + p[len(m.group(1)) + len(m.group(2)):]
+            break
+    return p.strip("，,。.；; \t")
+
+
 # ---------- 拆解规则接口 ----------
 class DecomposeRule:
     """拆解规则接口：match 判断是否命中，decompose 返回子问题列表。"""
@@ -126,8 +146,10 @@ class CommaSplitRule(DecomposeRule):
             if i == 0:
                 result.append(p)
             else:
-                sub = f"{prefix}{p}" if prefix and not any(
-                    t in p for t in ("今天", "本月", "今年", "近", "本季度", "上周", "昨天", "当日", "当天")) else p
+                # 先清洗（去前导连接词等），再补公共时间前缀，避免连接词被挤到前缀之后残留
+                cleaned = _clean_sub_question(p)
+                sub = f"{prefix}{cleaned}" if prefix and not any(
+                    t in cleaned for t in ("今天", "本月", "今年", "近", "本季度", "上周", "昨天", "当日", "当天")) else cleaned
                 result.append(sub)
         return result
 
@@ -263,6 +285,8 @@ class MultiQueryDecomposer:
             if _hits >= 2:
                 _parts = [p.strip("，,。.；; \t") for p in re.split(r"[，,。.；;]", question)
                           if p.strip("，,。.；; \t") and len(p.strip("，,。.；; \t")) > 6]
+                # 清洗前导连接词（如「并分析…」「以及…」），避免残留在子问题中
+                _parts = [_clean_sub_question(p) for p in _parts]
                 # 每段都必须含指标词，且非首段不以「按」开头（防误拆补充说明）
                 if len(_parts) >= 2 and all(
                     any(w in p for w in _metric_words) for p in _parts

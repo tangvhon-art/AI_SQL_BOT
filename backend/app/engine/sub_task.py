@@ -15,7 +15,13 @@ logger = logging.getLogger(__name__)
 
 
 class SubQueryNonSqlError(Exception):
-    """N2 返回非 SQL 结果（clarify/knowledge/chat/refuse）：重试无意义，直接失败隔离。"""
+    """N2 返回非 SQL 结果（clarify/knowledge/chat/refuse）：重试无意义。
+    clarify 携带候选表（candidates），供上层做执行中澄清（needs_clarify）。"""
+
+    def __init__(self, msg: str, candidates: list | None = None, intent: str = ""):
+        super().__init__(msg)
+        self.candidates = candidates or []
+        self.intent = intent
 
 
 @dataclass
@@ -33,6 +39,7 @@ class SubTaskResult:
     sql: str = ""
     error: str = ""
     retryable: bool = True         # clarify 等非查询失败不可重试
+    clarify_candidates: list = field(default_factory=list)  # 执行中澄清：候选表（[{table,comment}]）
 
     def to_card(self) -> dict:
         """转为 dashboard 卡片数据（落库 + 事件载荷）。"""
@@ -49,6 +56,7 @@ class SubTaskResult:
             "status": self.status,
             "error": self.error,
             "retryable": self.retryable,
+            "clarify_candidates": self.clarify_candidates,
         }
 
 
@@ -101,6 +109,21 @@ def run_subtask_pipeline(sub: Any, ctx: SubTaskContext) -> SubTaskResult:
             raise RuntimeError("未生成 SQL（LLM 返回为空或 clarify）")
         out.sql = sql
     except SubQueryNonSqlError as exc:
+        # 执行中澄清：clarify 且带候选表 → 不下发失败卡片，通知前端展示选表 UI，用户勾选后重跑
+        if exc.intent == "clarify" and exc.candidates:
+            logger.warning("[子查询][%s] N2 需要澄清选表（候选 %d 张），等待用户确认: %s",
+                           sub_id, len(exc.candidates),
+                           [c.get("table") for c in exc.candidates][:8])
+            out.status = "needs_clarify"
+            out.error = str(exc)
+            out.clarify_candidates = exc.candidates
+            ctx.emit("sub_clarify", {
+                "sub_id": sub_id,
+                "candidates": exc.candidates,
+                "question": sub.question,
+                "title": out.title,
+            })
+            return out
         logger.warning("[子查询][%s] N2 非查询意图（不可重试）: %s", sub_id, exc)
         return _fail(ctx, sub, out, f"无法生成 SQL：{exc}", retryable=False)
     except Exception as exc:  # noqa: BLE001
@@ -249,12 +272,24 @@ def _generate_sql_with_retry(sub: Any, ctx: SubTaskContext) -> str:
                     result = event.get("result")
             sql, intent = _extract_sql_from_result(result)
             if sql:
+                # 防线：mock/降级 SQL（LLM 不可用时「前 100 行」应付式查询）不允许当作真实结果
+                explain = result.get("explain") if isinstance(result, dict) else ""
+                if isinstance(explain, str) and (
+                        "[降级模式]" in explain or "演示模式" in explain):
+                    logger.warning("[子查询][%s] N2 拒绝 mock 降级 SQL（LLM 不可用）: %s",
+                                   sub.sub_id, explain[:120])
+                    raise SubQueryNonSqlError(
+                        "LLM 不可用：无法生成真实业务 SQL（系统未配置大模型或模型不可达）。"
+                        "请在「模型配置」中启用大模型后重试。",
+                        intent="refuse")
                 return sql
             # 非查询意图（clarify/knowledge/chat/refuse）：重试无意义，抛专用异常供上层标记不可重试
             if intent in ("clarify", "knowledge", "chat", "refuse"):
                 explain = result.get("explain") if isinstance(result, dict) else ""
+                candidates = (result.get("candidates") or []) if isinstance(result, dict) else []
                 raise SubQueryNonSqlError(
-                    f"{intent}: {explain or '该问题无法自动生成查询 SQL，请换种问法或补充表/字段信息'}")
+                    f"{intent}: {explain or '该问题无法自动生成查询 SQL，请换种问法或补充表/字段信息'}",
+                    candidates=candidates, intent=intent)
             last_error = intent or (f"result 为空（生成器返回 {type(result).__name__}）"
                                     if result is not None else "result 为空")
         except SubQueryNonSqlError:

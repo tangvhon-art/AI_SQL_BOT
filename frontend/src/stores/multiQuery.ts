@@ -41,6 +41,7 @@ interface MultiQueryState {
     interpretation?: string
   }) => void
   subError: (subId: string, error: string, retryable?: boolean, stage?: string) => void
+  subClarify: (subId: string, candidates: Array<{ table: string; comment?: string }>) => void
   retryCard: (subId: string) => void
   markDashboard: (messageId: number | null) => void
   markCancelled: () => void
@@ -50,9 +51,10 @@ interface MultiQueryState {
 /** 状态迁移守卫：只允许正向迁移，乱序/回退事件直接丢弃 */
 const FORWARD: Record<SubCardStatus, SubCardStatus[]> = {
   pending: ['generating'],
-  generating: ['executing', 'error', 'cancelled'],
-  executing: ['success', 'error', 'cancelled'],
+  generating: ['executing', 'error', 'cancelled', 'needs_clarify'],
+  executing: ['success', 'error', 'cancelled', 'needs_clarify'],
   error: ['generating'],            // 仅重试允许 error → generating
+  needs_clarify: ['generating'],    // 勾选确认表后重跑
   success: ['error'],               // 兼容重试后异常回退
   cancelled: [],
 }
@@ -191,6 +193,22 @@ export const useMultiQueryStore = create<MultiQueryState>((set, get) => ({
         subCards: {
           ...s.subCards,
           [subId]: { ...card, status: 'error', error, retryable: retryable ?? true, stage },
+        },
+      }
+    }),
+
+  subClarify: (subId, candidates) =>
+    set((s) => {
+      const card = s.subCards[subId]
+      if (!card) return s
+      if (!canTransition(card.status, 'needs_clarify')) return s
+      return {
+        subCards: {
+          ...s.subCards,
+          [subId]: {
+            ...card, status: 'needs_clarify', clarifyCandidates: candidates,
+            error: '需要选择查询表', retryable: true,
+          },
         },
       }
     }),

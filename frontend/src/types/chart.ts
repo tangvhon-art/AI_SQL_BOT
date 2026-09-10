@@ -52,11 +52,13 @@ export interface ChartCardConfig {
   /** 子查询ID（多查询关联） */
   subId?: string;
   /** 状态（V2：支持执行中/取消态） */
-  status?: 'success' | 'error' | 'loading' | 'pending' | 'generating' | 'executing' | 'cancelled';
+  status?: 'success' | 'error' | 'loading' | 'pending' | 'generating' | 'executing' | 'cancelled' | 'needs_clarify';
   /** 错误信息 */
   error?: string;
   /** 可重试（error 态显示重试按钮） */
   retryable?: boolean;
+  /** 执行中澄清候选表 */
+  clarifyCandidates?: Array<{ table: string; comment?: string }>;
   /** 确定性事实（解读数字来源） */
   facts?: Record<string, unknown>;
   /** 异常标注 */
@@ -137,6 +139,10 @@ export interface SubQuerySpec {
   title?: string;
   confidence?: number;                   // 要素提取置信度（低置信度前端高亮）
   enabled?: boolean;                     // 用户确认时是否启用
+  // 选表澄清（Phase A 探测）：子查询选表歧义时预览面板展示候选表
+  needs_tables?: boolean;                // 需要用户确认查询表
+  candidate_tables?: Array<{ table: string; comment?: string }>;
+  confirmed_tables?: string[];           // 用户澄清确认的表（confirm 携带）
 }
 
 /** 多查询 SSE 事件：multi_spec（V2：含 task_id + 完整结构化子查询） */
@@ -193,6 +199,14 @@ export interface SubErrorEvent {
   stage?: string;
 }
 
+/** 多查询 SSE 事件：sub_clarify（执行中选表澄清：不下发失败，等待用户勾选后重跑） */
+export interface SubClarifyEvent {
+  sub_id: string;
+  candidates: Array<{ table: string; comment?: string }>;
+  question?: string;
+  title?: string;
+}
+
 /** 多查询 SSE 事件：dashboard（V2：总览 + 消息 id） */
 export interface DashboardEventV2 {
   layout: LayoutItem[];
@@ -208,6 +222,7 @@ export interface DashboardEventV2 {
     anomalies?: Array<{ type: string; desc: string }>;
     trace?: Record<string, unknown>;
     interpretation?: string;
+    clarify_candidates?: Array<{ table: string; comment?: string }>;
   }>;
   overview?: string;
   original_question: string;
@@ -217,7 +232,7 @@ export interface DashboardEventV2 {
 
 /** 前端卡片状态机（按 sub_id 索引，SSE 事件正向累积，禁止回退） */
 export type SubCardStatus =
-  | 'pending' | 'generating' | 'executing' | 'success' | 'error' | 'cancelled';
+  | 'pending' | 'generating' | 'executing' | 'success' | 'error' | 'cancelled' | 'needs_clarify';
 
 export interface SubCardState {
   sub_id: string;
@@ -228,6 +243,7 @@ export interface SubCardState {
   confidence?: number;
   sql?: string;
   chartType?: string;
+  clarifyCandidates?: Array<{ table: string; comment?: string }>;  // 执行中澄清候选表
   data?: { columns: string[]; rows: any[][] } | null;
   facts?: Record<string, unknown>;
   anomalies?: Array<{ type: string; desc: string }>;

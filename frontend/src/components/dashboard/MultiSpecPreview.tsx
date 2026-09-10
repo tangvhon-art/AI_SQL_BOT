@@ -1,4 +1,4 @@
-// Phase A 拆解预览面板：子查询列表（勾选/编辑/删除/新增）+ 确认/重拆/取消
+// Phase A 拆解预览面板：子查询列表（勾选/编辑/删除/新增）+ 选表澄清 + 确认/重拆/取消
 // 组件持有本地可编辑清单，确认时把最终清单交给父层 → confirm 接口进入 Phase B
 import { useEffect, useState } from 'react'
 import {
@@ -6,7 +6,7 @@ import {
 } from 'antd'
 import {
   DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined,
-  CheckOutlined, CloseOutlined,
+  CheckOutlined, CloseOutlined, TableOutlined,
 } from '@ant-design/icons'
 import type { SubQuerySpec } from '../../types/chart'
 
@@ -18,13 +18,15 @@ const INTENT_LABELS: Record<string, string> = {
 interface Props {
   subQueries: SubQuerySpec[]
   confirming?: boolean
+  /** 全局 busy：拆解中/确认执行中/重试中/取消中 → 禁用所有操作按钮 */
+  busy?: boolean
   onConfirm: (subs: SubQuerySpec[]) => void
   onRegen?: () => void
   onCancel?: () => void
 }
 
 export default function MultiSpecPreview({
-  subQueries, confirming, onConfirm, onRegen, onCancel,
+  subQueries, confirming, busy, onConfirm, onRegen, onCancel,
 }: Props) {
   // 本地可编辑清单（初始来自拆解结果，用户编辑只影响本组件）
   const [items, setItems] = useState<SubQuerySpec[]>(subQueries)
@@ -34,6 +36,9 @@ export default function MultiSpecPreview({
   const [draft, setDraft] = useState({ question: '', title: '' })
 
   const enabledCount = items.filter((q) => q.enabled !== false).length
+  // 需澄清但未选表的子查询数（阻塞确认）
+  const blockedCount = items.filter(
+    (q) => q.enabled !== false && q.needs_tables && !(q.confirmed_tables ?? []).length).length
 
   const startEdit = (q: SubQuerySpec) => {
     setEditingId(q.sub_id)
@@ -157,6 +162,48 @@ export default function MultiSpecPreview({
                           message={<span style={{ fontSize: 12 }}>未识别到完整指标/维度，可编辑补全</span>}
                         />
                       ) : null}
+                      {q.needs_tables ? (
+                        <div style={{
+                          marginTop: 8, border: '1px dashed #B7A8F8', borderRadius: 8,
+                          padding: '8px 10px', background: '#FBF9FF',
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                            <TableOutlined style={{ color: '#7B61E8' }} />
+                            <span style={{ fontSize: 12.5, fontWeight: 600, color: '#4B3FD4' }}>
+                              请选择该子查询要查询的数据表（可多选）
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                            {(q.candidate_tables ?? []).map((t) => {
+                              const checked = (q.confirmed_tables ?? []).includes(t.table)
+                              return (
+                                <Checkbox
+                                  key={t.table}
+                                  checked={checked}
+                                  onChange={(e) => {
+                                    const cur = q.confirmed_tables ?? []
+                                    const next = e.target.checked
+                                      ? [...cur, t.table]
+                                      : cur.filter((x) => x !== t.table)
+                                    patch(q.sub_id, { confirmed_tables: next })
+                                  }}
+                                  style={{ fontSize: 12 }}
+                                >
+                                  {t.table}
+                                  {t.comment ? (
+                                    <span style={{ color: '#8c8c8c', fontWeight: 400 }}>（{t.comment}）</span>
+                                  ) : null}
+                                </Checkbox>
+                              )
+                            })}
+                            {(q.candidate_tables ?? []).length === 0 ? (
+                              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                未识别到候选表，可编辑问题补充表名后重试
+                              </Typography.Text>
+                            ) : null}
+                          </div>
+                        </div>
+                      ) : null}
                     </>
                   )}
                 </div>
@@ -193,12 +240,22 @@ export default function MultiSpecPreview({
         <Button
           type="primary" size="small"
           loading={confirming}
-          disabled={enabledCount === 0}
+          disabled={enabledCount === 0 || blockedCount > 0}
           onClick={() => onConfirm(items.filter((q) => q.enabled !== false))}
         >
           确认执行（{enabledCount}）
         </Button>
       </Space>
+      {blockedCount > 0 ? (
+        <Alert
+          type="warning" showIcon style={{ marginTop: 8, padding: '2px 10px', fontSize: 12 }}
+          message={
+            <span style={{ fontSize: 12 }}>
+              还有 {blockedCount} 个子查询需要先选择数据表，选择后可执行
+            </span>
+          }
+        />
+      ) : null}
     </div>
   )
 }

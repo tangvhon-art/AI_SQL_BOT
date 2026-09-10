@@ -87,6 +87,7 @@ class RetryIn(BaseModel):
     workspace_id: int | None = None
     model_id: int | None = None
     datasource_id: int | None = None      # 优先于落库值（兼容历史消息未存数据源）
+    confirmed_tables: list[str] = []      # 执行中澄清后勾选确认的表（重跑时锁定选表）
 
 
 # =====================================================================
@@ -161,6 +162,7 @@ def try_handle_multi_query(
                 "mode": "multi_preview",
                 "task_id": multi_spec.task_id,
                 "multi_spec": multi_spec_dict,
+                "workspace_id": ws_id,
                 "query_spec": spec_to_dict(spec) if spec else {},
             })))
         db.commit()
@@ -213,17 +215,19 @@ def confirm(body: MultiConfirmIn, db: Session = Depends(get_db),
                                 detail=f"子查询 {item.get('sub_id', '?')} 字段非法: {exc}") from exc
 
     task_id = body.task_id or uuid.uuid4().hex[:12]
+    ws_id = body.workspace_id or user.workspace_id
     logger.info("[多查询][%s] confirm 受理: %d 个子查询 → Phase B 并行执行",
                 task_id, len(sub_specs))
 
     return StreamingResponse(
-        _confirm_stream(body, sub_specs, task_id, db, user.id),
+        _confirm_stream(body, sub_specs, task_id, db, user.id, ws_id),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 async def _confirm_stream(body: MultiConfirmIn, sub_specs: list[SubQuerySpec],
-                          task_id: str, db: Session, user_id: int):
+                          task_id: str, db: Session, user_id: int,
+                          ws_id: int):
     """Phase B SSE 生成器：编排器在后台线程执行，事件经队列实时下发。"""
     queue: asyncio.Queue[str] = asyncio.Queue()
     loop = asyncio.get_running_loop()
@@ -233,7 +237,7 @@ async def _confirm_stream(body: MultiConfirmIn, sub_specs: list[SubQuerySpec],
 
     def run() -> None:
         try:
-            _run_confirm_sync(body, sub_specs, task_id, db, user_id, emit)
+            _run_confirm_sync(body, sub_specs, task_id, db, user_id, emit, ws_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception("[多查询][%s] confirm 执行异常", task_id)
             emit("error", {"code": "INTERNAL", "msg": f"多查询执行失败: {exc}"})
@@ -255,13 +259,14 @@ async def _confirm_stream(body: MultiConfirmIn, sub_specs: list[SubQuerySpec],
 
 def _run_confirm_sync(body: MultiConfirmIn, sub_specs: list[SubQuerySpec],
                       task_id: str, db: Session, user_id: int,
-                      emit: Callable[[str, dict], None]) -> None:
+                      emit: Callable[[str, dict], None], ws_id: int):
     """同步执行 Phase B：编排 → dashboard → 落库（运行于后台线程）。"""
     from ..config_override import get_effective as get_settings
     from ..models import ConversationMessage
 
     settings = get_settings()
-    ws_id = body.workspace_id or 0
+    # 路由层已按 user.workspace_id 兜底计算（body.workspace_id 优先）
+    ws_id = body.workspace_id or ws_id
 
     llm = None
     if body.model_id:
@@ -343,6 +348,7 @@ def _run_confirm_sync(body: MultiConfirmIn, sub_specs: list[SubQuerySpec],
                 "task_id": task_id,
                 "original_question": body.question,
                 "sub_queries": [s.to_dict() for s in sub_specs],
+                "workspace_id": ws_id,
             },
             "query_spec": {},
             "task_id": task_id,
@@ -386,19 +392,24 @@ def sub_retry(message_id: int, sub_id: str, body: RetryIn,
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"子查询规格非法: {exc}") from exc
 
-    ws_id = body.workspace_id or (content.get("multi_spec") or {}).get("workspace_id") or 0
+    ws_id = (body.workspace_id
+             or (content.get("multi_spec") or {}).get("workspace_id")
+             or user.workspace_id or 0)
     datasource_id = (body.datasource_id
                      or (content.get("dashboard") or {}).get("datasource_id") or 0)
 
-    logger.info("[多查询][重试] message_id=%d sub_id=%s 重新执行", message_id, sub_id)
+    logger.info("[多查询][重试] message_id=%d sub_id=%s 重新执行（confirmed_tables=%s）",
+                message_id, sub_id, body.confirmed_tables)
     return StreamingResponse(
-        _retry_stream(msg, sub, card, db, user.id, ws_id, body.model_id),
+        _retry_stream(msg, sub, card, db, user.id, ws_id, body.model_id,
+                      body.confirmed_tables),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 async def _retry_stream(msg: Any, sub: SubQuerySpec, card: dict,
-                        db: Session, user_id: int, ws_id: int, model_id: int | None):
+                        db: Session, user_id: int, ws_id: int, model_id: int | None,
+                        confirmed_tables: list[str] | None = None):
     queue: asyncio.Queue[str] = asyncio.Queue()
     loop = asyncio.get_running_loop()
 
@@ -407,6 +418,9 @@ async def _retry_stream(msg: Any, sub: SubQuerySpec, card: dict,
 
     def run() -> None:
         try:
+            # 执行中澄清：把用户勾选确认的表写回子查询，N2 走「已确认查询表」锁定路径
+            if confirmed_tables:
+                sub.confirmed_tables = list(confirmed_tables)
             _run_retry_sync(msg, sub, card, db, user_id, ws_id, model_id, emit)
         except Exception as exc:  # noqa: BLE001
             logger.exception("[多查询][重试] sub=%s 执行异常", sub.sub_id)
@@ -492,14 +506,15 @@ def _run_retry_sync(msg: Any, sub: SubQuerySpec, card: dict, db: Session,
 def regen(body: RegenIn, db: Session = Depends(get_db),
           user=Depends(get_current_user)):
     """重新拆解：返回新的子查询清单（前端刷新预览面板）。"""
+    ws_id = body.workspace_id or user.workspace_id
     llm = None
     try:
-        llm = resolve_llm_client(db, body.workspace_id or 0, scene="sql")
+        llm = resolve_llm_client(db, ws_id, scene="sql")
     except Exception:  # noqa: BLE001
         llm = None
     decomposer = MultiQueryDecomposer(llm=llm)
     multi_spec = decomposer.decompose(
-        body.question, body.workspace_id or 0, body.datasource_id or 0)
+        body.question, ws_id, body.datasource_id or 0)
 
     recommender = ChartRecommender()
     for sub in multi_spec.sub_queries:

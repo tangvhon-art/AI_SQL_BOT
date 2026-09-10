@@ -52,6 +52,8 @@ export default function ChatPage() {
     const idx = useChatStore.getState().messages.length - 1
     useChatStore.getState().patchMessage(idx, patch)
   }
+  // QuerySpec 缓存：spec 事件先不渲染，待确定单/多查询模式后一并展示（拆解前不出现理解卡片）
+  const specRef = useRef<Record<string, unknown> | null>(null)
   // 短别名：各 SSE 回调中统一用 update(...)
   const update = updateLastAssistant
 
@@ -257,6 +259,8 @@ export default function ChatPage() {
     }
     appendUser(q)
     setQuestion('')
+    // 新一轮问题：清空上一轮的 QuerySpec 缓存
+    specRef.current = null
     setStreaming(true)
     setStage('准备中…')
     setSteps([])
@@ -318,8 +322,9 @@ export default function ChatPage() {
             update({ content_type: 'result', content: { chart: p } as never })
           },
           onSpec: (spec) => {
-            // AI 问数重构：后端下发 QuerySpec（"我理解的问题"），前端可展示可纠错
-            update({ content_type: 'result', content: { query_spec: spec } as never })
+            // AI 问数重构：后端下发 QuerySpec（"我理解的问题"）。
+            // 先缓存不渲染：多查询需等 multi_spec（拆解结果）后再一并展示，避免拆解前出现理解卡片
+            specRef.current = spec
           },
           onTrace: (trace) => {
             // 口径与溯源：数据源表/映射/SQL/耗时，前端折叠面板展示
@@ -334,6 +339,7 @@ export default function ChatPage() {
                 text: p.text,
                 sections: p.sections ?? undefined,
                 anomalies: p.anomalies ?? undefined,
+                query_spec: specRef.current ?? undefined,
                 ...(candidates ? { candidates, clarify_kind: kind } : {}),
               } as never,
             })
@@ -356,7 +362,15 @@ export default function ChatPage() {
               sub_queries: spec.sub_queries ?? [],
               layout_hint: spec.layout_hint,
             })
-            update({ content_type: 'result', content: { multi_spec: p, mode: 'multi_preview' } as never })
+            // 拆解结果后一并展示"我理解的问题"（spec 摘要随预览下发）
+            update({
+              content_type: 'result',
+              content: {
+                multi_spec: p,
+                mode: 'multi_preview',
+                query_spec: specRef.current ?? undefined,
+              } as never,
+            })
           },
           onMultiTask: (p) => {
             useMultiQueryStore.getState().setTaskId(p.task_id)
@@ -377,6 +391,11 @@ export default function ChatPage() {
           onSubError: (p) => {
             useMultiQueryStore.getState().subError(
               String(p.sub_id), String(p.error ?? '执行失败'), p.retryable !== false)
+          },
+          onSubClarify: (p) => {
+            // 执行中选表澄清：不下发失败，展示候选表等待用户勾选后重跑
+            const candidates = (p.candidates ?? []) as Array<{ table: string; comment?: string }>
+            useMultiQueryStore.getState().subClarify(String(p.sub_id), candidates)
           },
           onDashboard: (p) => {
             const payload = p as unknown as DashboardEventV2
@@ -435,7 +454,6 @@ export default function ChatPage() {
     const taskId = state.taskId
     const originQuestion = state.originQuestion
     useMultiQueryStore.setState({ confirmLoading: true })
-    state.startExecuting(subs)
     setStreaming(true)
     try {
       await postMultiStream('/api/v1/chat/multi/confirm', {
@@ -447,7 +465,11 @@ export default function ChatPage() {
         task_id: taskId,
         sub_queries: subs,
       }, {
-        onMultiTask: (p) => useMultiQueryStore.getState().setTaskId(p.task_id),
+        onMultiTask: (p) => {
+          // 第一个 SSE 事件到达后再切换到执行进度面板；此前保持预览卡片 + 确认按钮 loading，防止二次点击
+          useMultiQueryStore.getState().startExecuting(subs)
+          useMultiQueryStore.getState().setTaskId(p.task_id)
+        },
         onSubProgress: (p) => useMultiQueryStore.getState().progress(p.sub_id, p.stage, p.msg),
         onSubSql: (p) => useMultiQueryStore.getState().subSql(String(p.sub_id), String(p.sql ?? '')),
         onSubResult: (p) => useMultiQueryStore.getState().subResult(p as never),
@@ -500,9 +522,9 @@ export default function ChatPage() {
     }
   }
 
-  /** 单卡重试：失败卡片重新执行（SSE 子流，事件按同一 sub_id 累积） */
+  /** 单卡重试：失败卡片重新执行（SSE 子流，事件按同一 sub_id 累积）；澄清卡勾选表后带 confirmed_tables 重跑 */
   const retryLockRef = useRef<Record<string, number>>({})
-  const handleRetryCard = async (subId: string) => {
+  const handleRetryCard = async (subId: string, confirmedTables?: string[]) => {
     const state = useMultiQueryStore.getState()
     const messageId = state.messageId
     if (!messageId) {
@@ -519,12 +541,17 @@ export default function ChatPage() {
       await postMultiStream(`/api/v1/chat/multi/${messageId}/sub/${subId}/retry`, {
         conversation_id: currentConvId, workspace_id: 0, model_id: modelId ?? undefined,
         datasource_id: dsId,
+        confirmed_tables: confirmedTables ?? [],
       }, {
         onSubProgress: (p) => useMultiQueryStore.getState().progress(p.sub_id, p.stage, p.msg),
         onSubSql: (p) => useMultiQueryStore.getState().subSql(String(p.sub_id), String(p.sql ?? '')),
         onSubResult: (p) => useMultiQueryStore.getState().subResult(p as never),
         onSubError: (p) => useMultiQueryStore.getState().subError(
           String(p.sub_id), String(p.error ?? '执行失败'), p.retryable !== false),
+        onSubClarify: (p) => {
+          const candidates = (p.candidates ?? []) as Array<{ table: string; comment?: string }>
+          useMultiQueryStore.getState().subClarify(String(p.sub_id), candidates)
+        },
         onDashboard: (p) => {
           const payload = p as unknown as DashboardEventV2
           // 与历史 dashboard 合并（retry 子流仅更新该卡，保留 overview 等字段）
@@ -766,7 +793,7 @@ export default function ChatPage() {
             icon={<ArrowUpOutlined />}
             onClick={() => send()}
             loading={streaming}
-            disabled={!question.trim()}
+            disabled={!question.trim() || streaming}
             style={{ width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
           />
         </div>

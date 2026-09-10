@@ -117,6 +117,11 @@ def probe_table_clarify(sub: SubQuerySpec, datasource_id: int,
                 return {"needs": False, "candidates": [], "reason": "no_table_no_hint"}
             candidates = [{"table": t, "comment": ""} for t in hits[:15]]
             return {"needs": True, "candidates": candidates, "reason": "no_table"}
+        # LLM 选中多张表：执行时大概率触发 clarify（LLM 选表不稳定），预览阶段直接要求澄清
+        if len(tables) >= 2:
+            candidates = [{"table": t.table_name,
+                           "comment": getattr(t, "comment", "") or ""} for t in tables[:15]]
+            return {"needs": True, "candidates": candidates, "reason": "multi_table"}
         clarify = _detect_clarify(sub.question, datasource_id, tables)
         if clarify:
             return {"needs": True, "candidates": clarify[:15], "reason": "ambiguous"}

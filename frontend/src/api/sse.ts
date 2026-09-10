@@ -32,6 +32,7 @@ export interface SSEHandlers {
   onSubSql?: (payload: Record<string, unknown>) => void
   onSubResult?: (payload: Record<string, unknown>) => void
   onSubError?: (payload: Record<string, unknown>) => void
+  onSubClarify?: (payload: Record<string, unknown>) => void
   onDashboard?: (payload: Record<string, unknown>) => void
   // 多查询 V2.0（两阶段协同编排）
   onMultiTask?: (payload: { task_id: string }) => void
@@ -84,6 +85,7 @@ function dispatchSSE(block: string, handlers: SSEHandlers): void {
     case 'sub_sql': handlers.onSubSql?.(payload); break
     case 'sub_result': handlers.onSubResult?.(payload); break
     case 'sub_error': handlers.onSubError?.(payload); break
+    case 'sub_clarify': handlers.onSubClarify?.(payload); break
     case 'dashboard': handlers.onDashboard?.(payload); break
     // AI 解读
     case 'ai_interpretation_start': handlers.onAiInterpretationStart?.(payload); break
