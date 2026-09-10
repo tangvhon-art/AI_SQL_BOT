@@ -100,16 +100,28 @@ export async function postSseStream(
   url: string,
   body: Record<string, unknown>,
   handlers: SSEHandlers,
+  signal?: AbortSignal,
 ): Promise<void> {
   const token = localStorage.getItem(TOKEN_KEY)
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token ?? ''}`,
-    },
-    body: JSON.stringify(body),
-  })
+  let resp: Response
+  try {
+    resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token ?? ''}`,
+      },
+      body: JSON.stringify(body),
+      signal,
+    })
+  } catch (e: any) {
+    if (e?.name === 'AbortError') {
+      handlers.onError?.({ code: 'ABORT', msg: '已停止生成' })
+      return
+    }
+    handlers.onError?.({ code: 'NETWORK', msg: '网络请求失败' })
+    return
+  }
   if (!resp.ok || !resp.body) {
     handlers.onError?.({ code: 'HTTP', msg: `请求失败: ${resp.status}` })
     return
@@ -117,16 +129,24 @@ export async function postSseStream(
   const reader = resp.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    let idx: number
-    while ((idx = buffer.indexOf('\n\n')) >= 0) {
-      const block = buffer.slice(0, idx)
-      buffer = buffer.slice(idx + 2)
-      dispatchSSE(block, handlers)
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let idx: number
+      while ((idx = buffer.indexOf('\n\n')) >= 0) {
+        const block = buffer.slice(0, idx)
+        buffer = buffer.slice(idx + 2)
+        dispatchSSE(block, handlers)
+      }
     }
+  } catch (e: any) {
+    if (e?.name === 'AbortError') {
+      handlers.onError?.({ code: 'ABORT', msg: '已停止生成' })
+      return
+    }
+    throw e
   }
   if (buffer.trim()) dispatchSSE(buffer, handlers)
 }
@@ -136,8 +156,9 @@ export async function postMultiStream(
   url: string,
   body: Record<string, unknown>,
   handlers: SSEHandlers,
+  signal?: AbortSignal,
 ): Promise<void> {
-  await postSseStream(url, body, handlers)
+  await postSseStream(url, body, handlers, signal)
 }
 
 export async function postChatStream(
@@ -151,6 +172,7 @@ export async function postChatStream(
     doc_session_id?: string | null
   },
   handlers: SSEHandlers,
+  signal?: AbortSignal,
 ): Promise<void> {
-  await postSseStream('/api/v1/chat', body as Record<string, unknown>, handlers)
+  await postSseStream('/api/v1/chat', body as Record<string, unknown>, handlers, signal)
 }

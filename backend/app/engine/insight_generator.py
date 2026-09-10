@@ -41,20 +41,24 @@ class InsightConfig:
     """洞察分析完整配置。"""
 
     def __init__(self, purpose: str = "", datasource_id: int = 0,
-                 items: list[InsightItem] | None = None):
+                 items: list[InsightItem] | None = None,
+                 model_id: int | None = None):
         self.purpose = purpose
         self.datasource_id = datasource_id
         self.items = items or []
+        self.model_id = model_id
 
     def to_dict(self) -> dict:
         return {"purpose": self.purpose, "datasource_id": self.datasource_id,
+                "model_id": self.model_id,
                 "items": [item.to_dict() for item in self.items]}
 
     @classmethod
     def from_dict(cls, d: dict) -> "InsightConfig":
         items = [InsightItem(**{k: v for k, v in item.items() if k in InsightItem.__init__.__code__.co_varnames})
                  for item in d.get("items", [])]
-        return cls(purpose=d.get("purpose", ""), datasource_id=d.get("datasource_id", 0), items=items)
+        return cls(purpose=d.get("purpose", ""), datasource_id=d.get("datasource_id", 0),
+                   items=items, model_id=d.get("model_id"))
 
 
 class InsightGenerator:
@@ -73,38 +77,123 @@ class InsightGenerator:
         self.workspace_id = workspace_id
         self.recommender = ChartRecommender()
 
-    def generate_draft(self, purpose: str, datasource_id: int) -> InsightConfig:
-        """根据分析目的 + 数据源生成分析项草案。"""
+    def generate_draft(self, purpose: str, datasource_id: int, model_id: int | None = None) -> InsightConfig:
+        """根据分析目的 + 数据源生成分析项草案。
+
+        优先走多查询拆解（规则链 + LLM 兜底），将拆解出的子查询转为分析项；
+        拆解失败时回退到直接 LLM 生成，再失败用默认模板。
+        """
         ds = self.db.query(Datasource).get(datasource_id)
         if not ds:
             raise ValueError("数据源不存在")
 
-        # 尝试 LLM 生成
-        items = self._llm_generate_items(purpose, datasource_id)
+        items: list[InsightItem] = []
 
-        # LLM 失败或返回空时，使用默认模板
+        # 1. 多查询拆解（仅拆解，不做要素补齐/选表探测）
+        try:
+            from .multi_query import MultiQueryDecomposer
+            engine = MultiQueryDecomposer(llm=self.llm)
+            sub_questions = engine.decompose_questions(purpose)
+            for i, q in enumerate(sub_questions):
+                question = q.strip()
+                if not question:
+                    continue
+                items.append(InsightItem(
+                    id=f"item{i+1}",
+                    title=question[:24],
+                    question=question,
+                    chart_type="bar",
+                    enabled=True,
+                ))
+            logger.info("洞察草案 轻量拆解: %d 个子问题 → %d 个分析项", len(sub_questions), len(items))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("洞察草案 拆解失败，回退直接 LLM 生成: %s", exc)
+
+        # 2. 拆解为空时回退直接 LLM 生成
+        if not items:
+            items = self._llm_generate_items(purpose, datasource_id)
+
+        # 3. 仍为空时用默认模板
         if not items:
             items = self._default_items(purpose)
 
-        return InsightConfig(purpose=purpose, datasource_id=datasource_id, items=items)
+        return InsightConfig(purpose=purpose, datasource_id=datasource_id, items=items, model_id=model_id)
+
+    def preview(self, config: InsightConfig, user_id: int = 0) -> list[dict]:
+        """预览：对每个启用分析项执行 NL2SQL + 查询，返回卡片数据（不保存报告）。"""
+        from ..executor import run_query, SqlExecError
+        from .nl2sql import generate_sql
+
+        enabled_items = [item for item in config.items if item.enabled]
+        if not enabled_items:
+            return []
+
+        results = []
+        for item in enabled_items:
+            card = {
+                "id": item.id,
+                "title": item.title,
+                "question": item.question,
+                "chart_type": item.chart_type,
+                "sql": "",
+                "columns": [],
+                "rows": [],
+                "status": "pending",
+                "error": "",
+            }
+            try:
+                gen_result = None
+                for event in generate_sql(
+                    config.datasource_id, self.workspace_id, item.question,
+                    llm=self.llm):
+                    if isinstance(event, dict) and event.get("type") == "result":
+                        gen_result = event.get("result")
+                        break
+                if not gen_result:
+                    card["status"] = "error"
+                    card["error"] = "未能生成 SQL"
+                    results.append(card)
+                    continue
+                sql = gen_result.get("sql", "")
+                if not sql:
+                    card["status"] = "error"
+                    card["error"] = gen_result.get("explain") or "未能生成 SQL"
+                    results.append(card)
+                    continue
+                card["sql"] = sql
+                qr = run_query(config.datasource_id, sql, user_id)
+                card["columns"] = qr.get("columns", [])
+                card["rows"] = qr.get("rows", [])
+                card["status"] = "success"
+            except SqlExecError as exc:
+                card["status"] = "error"
+                card["error"] = str(exc)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("洞察预览 项=%s 执行失败: %s", item.id, exc)
+                card["status"] = "error"
+                card["error"] = str(exc)[:200]
+            results.append(card)
+        return results
 
     def execute(self, config: InsightConfig, template_id: int | None = None,
                 prompt_template_id: int | None = None, created_by: int = 0) -> Report:
-        """执行配置：并行执行各分析项 → 汇总 Dashboard → AI解读 → 保存报告。"""
+        """执行配置：实际执行各分析项 SQL → 汇总 Dashboard → AI解读 → 保存报告。"""
         enabled_items = [item for item in config.items if item.enabled]
         if not enabled_items:
             raise ValueError("没有启用的分析项")
 
-        # 1. 并行执行各分析项（此处简化为生成占位结果，实际应调用 nl2sql + 执行）
+        # 1. 实际执行各分析项（复用 preview 逻辑：NL2SQL 生成 + 执行查询）
+        preview_cards = self.preview(config, user_id=created_by)
         dashboard_cards = []
-        for item in enabled_items:
+        for pc in preview_cards:
             dashboard_cards.append({
-                "sub_id": item.id,
-                "title": item.title,
-                "chart_type": item.chart_type,
-                "data": {"columns": ["维度", "数值"], "rows": [["示例", 0]]},
-                "sql": "",
-                "status": "success",
+                "sub_id": pc["id"],
+                "title": pc["title"],
+                "chart_type": pc["chart_type"],
+                "data": {"columns": pc["columns"], "rows": pc["rows"]},
+                "sql": pc["sql"],
+                "status": pc["status"],
+                "error": pc.get("error", ""),
             })
 
         layout = self.recommender.recommend_layout(

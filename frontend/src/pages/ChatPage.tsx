@@ -5,7 +5,7 @@ import {
 } from 'antd'
 import type { InputRef } from 'antd'
 import {
-  HistoryOutlined, PlusOutlined, ArrowUpOutlined, DownOutlined,
+  HistoryOutlined, PlusOutlined, ArrowUpOutlined, DownOutlined, StopOutlined,
 } from '@ant-design/icons'
 import { client, errMsg } from '../api/client'
 import { postChatStream, postMultiStream } from '../api/sse'
@@ -49,6 +49,8 @@ export default function ChatPage() {
   const [reportSaving, setReportSaving] = useState(false)
   const reportMsgRef = useRef<ChatMsg | null>(null)
   const reportInputRef = useRef<InputRef>(null)
+  // 生成中断控制器
+  const abortRef = useRef<AbortController | null>(null)
   const {
     conversations, currentConvId, messages, streaming, stage,
     setConversations, setCurrentConvId, setMessages, appendUser, appendStreamMsg, setStreaming, setStage,
@@ -287,6 +289,7 @@ export default function ChatPage() {
       useChatStore.getState().appendDelta(idx, key, delta)
     }
     try {
+      abortRef.current = new AbortController()
       await postChatStream(
         {
           conversation_id: currentConvId, question: q, datasource_id: dsId,
@@ -451,12 +454,30 @@ export default function ChatPage() {
             loadConversations()
           },
         },
+        abortRef.current?.signal,
       )
     } catch (e) {
-      update({ content_type: 'error', content: { msg: errMsg(e) } as never })
+      if ((e as any)?.name === 'AbortError') {
+        update({ content_type: 'error', content: { msg: '已停止生成' } as never })
+      } else {
+        update({ content_type: 'error', content: { msg: errMsg(e) } as never })
+      }
       setStreaming(false)
       setStage('')
     }
+  }
+
+  /** 停止生成：中断 SSE + 通知后端取消多查询任务 */
+  const handleStop = () => {
+    abortRef.current?.abort()
+    abortRef.current = null
+    const taskId = useMultiQueryStore.getState().taskId
+    if (taskId) {
+      client.post(`/chat/multi/${taskId}/cancel`, {}).catch(() => {})
+    }
+    setStreaming(false)
+    setStage('')
+    setSteps([])
   }
 
   // ========== 多查询 V2：两阶段协同编排（confirm / regen / retry / cancel）==========
@@ -468,6 +489,7 @@ export default function ChatPage() {
     useMultiQueryStore.setState({ confirmLoading: true })
     setStreaming(true)
     try {
+      abortRef.current = new AbortController()
       await postMultiStream('/api/v1/chat/multi/confirm', {
         conversation_id: currentConvId,
         question: originQuestion || useChatStore.getState().messages.find((m) => m.role === 'user')?.content?.text || '',
@@ -500,9 +522,11 @@ export default function ChatPage() {
           useMultiQueryStore.setState({ confirmLoading: false })
           loadConversations()
         },
-      })
+      }, abortRef.current?.signal)
     } catch (e) {
-      update({ content_type: 'error', content: { msg: errMsg(e) } as never })
+      if ((e as any)?.name !== 'AbortError') {
+        update({ content_type: 'error', content: { msg: errMsg(e) } as never })
+      }
       setStreaming(false)
       useMultiQueryStore.setState({ confirmLoading: false })
     }
@@ -851,15 +875,25 @@ export default function ChatPage() {
               </Dropdown>
             )}
           </div>
-          <Button
-            type="primary"
-            shape="circle"
-            icon={<ArrowUpOutlined />}
-            onClick={() => send()}
-            loading={streaming}
-            disabled={!question.trim() || streaming}
-            style={{ width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-          />
+          {streaming ? (
+            <Button
+              type="primary"
+              shape="circle"
+              icon={<StopOutlined />}
+              onClick={handleStop}
+              danger
+              style={{ width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+            />
+          ) : (
+            <Button
+              type="primary"
+              shape="circle"
+              icon={<ArrowUpOutlined />}
+              onClick={() => send()}
+              disabled={!question.trim()}
+              style={{ width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+            />
+          )}
         </div>
       </div>
       <div style={{ textAlign: 'center', marginTop: 8 }}>

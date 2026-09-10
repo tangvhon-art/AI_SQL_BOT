@@ -287,6 +287,19 @@ function buildTableOption(dataset: ChartDataset) {
   return { __table__: true, dataset };
 }
 
+// ---------- KPI 卡片 ----------
+function buildKpiOption(dataset: ChartDataset) {
+  const metric = dataset.metrics[0] || '数值'
+  const firstRow = dataset.rows[0] || {}
+  const value = firstRow[metric] ?? firstRow[Object.keys(firstRow)[0]] ?? 0
+  return {
+    __kpi__: true,
+    title: metric,
+    value: String(value),
+    subtitle: dataset.dimensions[0] ? String(firstRow[dataset.dimensions[0]] ?? '') : '',
+  };
+}
+
 // ---------- 注册 ----------
 registry.set('bar', buildBarOption);
 registry.set('line', buildLineOption);
@@ -305,6 +318,7 @@ registry.set('sankey', buildSankeyOption);
 registry.set('wordcloud', buildWordcloudOption);
 registry.set('compare_bar_line', buildCompareBarLineOption);
 registry.set('table', buildTableOption);
+registry.set('kpi', buildKpiOption);
 
 /**
  * 图表工厂：根据类型生成 ECharts option

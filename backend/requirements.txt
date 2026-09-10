@@ -1,12 +1,34 @@
-fastapi>=0.115
-uvicorn[standard]>=0.30
-sqlalchemy>=2.0
-pymysql>=1.1
-cryptography>=42.0
-PyJWT>=2.8
-pydantic>=2.7
-pydantic-settings>=2.3
-sqlglot>=25.0
-httpx>=0.27
-python-multipart>=0.0.9
-numpy>=2.0
+# ================= Web 框架与服务器 =================
+fastapi>=0.115            # Web API 框架，承载全部 REST 接口（app/api/*）
+uvicorn[standard]>=0.30   # ASGI 服务器，启动 FastAPI 应用（start.sh / 开发运行）
+
+# ================= 数据库 =================
+sqlalchemy>=2.0           # ORM 与连接池，数据模型与 CRUD（app/database.py、app/models.py）
+pymysql>=1.1              # MySQL 驱动，连接串 mysql+pymysql://（config.py / datasource_service.py）
+cryptography>=42.0        # 敏感字段 AESGCM 加解密（app/security.py），兼作 MySQL 8 加密认证依赖
+
+# ================= 认证与配置 =================
+PyJWT>=2.8                # 登录令牌（JWT）签发与校验（app/security.py）
+pydantic>=2.7             # 数据模型与请求/响应校验（全部 API 的 Pydantic 模型）
+pydantic-settings>=2.3    # 从 .env 加载运行配置（app/config.py）
+
+# ================= SQL 解析 =================
+sqlglot>=25.0             # SQL 解析/改写/方言转换：NL2SQL 生成、权限改写、血缘分析、软删除等
+
+# ================= 网络请求 =================
+httpx>=0.27               # HTTP 客户端，调用外部 LLM API（app/llm.py）
+
+# ================= 文件上传 =================
+python-multipart>=0.0.9   # FastAPI 解析 multipart 表单，文档/知识库文件上传（UploadFile）
+
+# ================= 数值计算 =================
+numpy>=2.0                # 文档向量余弦相似度计算（doc_retriever.py）、OCR 图片数组转换（doc_parser.py）
+
+
+pdfplumber>=0.11          # PDF 文字层解析与扫描版 PDF 渲染为图片
+pandas>=2.0               # Excel / CSV 解析（pd.ExcelFile / pd.read_csv）
+openpyxl>=3.1             # pandas 读取 .xlsx 所需的底层引擎
+python-docx>=1.1          # Word(.docx) 段落与表格解析
+chardet>=5.2              # 文本文件编码自动检测（UTF-8/GBK/GB2312）
+Pillow>=10.0              # 图片处理（OCR 前转为 RGB 数组）
+rapidocr-onnxruntime>=1.2 # 扫描版 PDF / 图片 OCR 识别（自带 onnxruntime、opencv-python 等）

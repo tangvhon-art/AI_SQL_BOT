@@ -82,7 +82,7 @@ SYSTEM_PROMPT = """你是企业数据问数助手，负责把用户中文问题�
 3. 关联条件**严格遵循【JOIN 路径】提供的主键-外键关联**，无自定义、无错误关联；【JOIN 路径】中未出现的表间关系禁止自行假设。
 
 ## 三、语法编写规范（强制）
-1. 表/字段必须使用**简洁易懂的别名**，字段引用无歧义（多表同名字段必须加表别名）；
+1. 表/字段必须使用**简洁易懂的别名**，字段引用无歧义（多表同名字段必须加表别名）；**同一条 SQL 中每个表/子查询的别名必须唯一**（禁止多个 FROM/JOIN 表使用相同别名，如 `FROM a t, b t`），多表 JOIN 时用 t1/t2 或有意义的缩写区分；
 2. 复杂查询**优先使用 CTE(WITH子句)** 拆分业务逻辑，禁止嵌套过深；
 3. 支持语法：子查询、`GROUP BY`/`HAVING`、`ORDER BY`、`LIMIT`(分页)、`WHERE`、`DISTINCT`、聚合函数(`SUM/COUNT/AVG/MAX/MIN`)、条件判断；
 4. 代码要求：**简洁高效、无冗余逻辑、无语法错误**；
@@ -1061,6 +1061,79 @@ def _normalize_sql_punctuation(sql: str) -> str:
     return "".join(out)
 
 
+def _auto_strip_invalid_filters(sql: str, fields: list[str]) -> str:
+    """确定性移除 WHERE/HAVING 中引用指定字段的条件（修复 LLM 幻觉过滤，无需 LLM 重试）。
+
+    处理三种位置：中间条件（AND field op val）、首条件后还有其他（WHERE field op val AND）、
+    唯一条件（WHERE field op val → WHERE 1=1）。字段可带表别名（t.field）。"""
+    import re
+    result = sql
+    for field in fields:
+        f = re.escape(field)
+        val = r"(?:'[^']*'|\"[^\"]*\"|\d+(?:\.\d+)?|NULL|TRUE|FALSE)"
+        op = (r"(?:(?:=|!=|<>|>=|<=|>|<)\s*" + val +
+              r"|IS\s+(?:NOT\s+)?NULL"
+              r"|(?:NOT\s+)?IN\s*\([^)]*\)"
+              r"|(?:NOT\s+)?LIKE\s*" + val + r")")
+        # 中间条件: AND t.field op value
+        result = re.sub(r'\bAND\s+(?:\w+\.)?' + f + r'\s*' + op + r'\b',
+                        '', result, flags=re.IGNORECASE)
+        # 首条件后还有: WHERE t.field op value AND → WHERE
+        result = re.sub(r'\bWHERE\s+(?:\w+\.)?' + f + r'\s*' + op + r'\s+AND\b',
+                        'WHERE', result, flags=re.IGNORECASE)
+        # HAVING 首条件同理
+        result = re.sub(r'\bHAVING\s+(?:\w+\.)?' + f + r'\s*' + op + r'\s+AND\b',
+                        'HAVING', result, flags=re.IGNORECASE)
+        # 唯一条件: WHERE t.field op value (后面是 GROUP/ORDER/LIMIT/UNION/;/)/$)
+        result = re.sub(r'\bWHERE\s+(?:\w+\.)?' + f + r'\s*' + op +
+                        r'(?=\s*(?:GROUP|ORDER|LIMIT|UNION|;|\)|$))',
+                        'WHERE 1=1', result, flags=re.IGNORECASE)
+        result = re.sub(r'\bHAVING\s+(?:\w+\.)?' + f + r'\s*' + op +
+                        r'(?=\s*(?:GROUP|ORDER|LIMIT|UNION|;|\)|$))',
+                        'HAVING 1=1', result, flags=re.IGNORECASE)
+    # 清理 WHERE 1=1 AND → WHERE
+    result = re.sub(r'\bWHERE\s+1=1\s+AND\b', 'WHERE', result, flags=re.IGNORECASE)
+    result = re.sub(r'\bHAVING\s+1=1\s+AND\b', 'HAVING', result, flags=re.IGNORECASE)
+    return result
+
+
+def _extract_bad_fields(error_msg: str) -> list[str]:
+    """从校验错误信息中提取问题字段名（字段不存在 / 未提及过滤字段）。"""
+    import re
+    fields: list[str] = []
+    # "字段不存在：is_deleted, record_flow.status" 或 "字段不存在：is_deleted；..."
+    m = re.search(r'字段不存在[：:]\s*(.+?)(?:；|$)', error_msg)
+    if m:
+        for part in re.split(r'[,，]', m.group(1)):
+            col = part.strip().split('.')[-1].strip('`\'\" ')
+            if col and '（' not in col and '可用列' not in col:
+                fields.append(col)
+    # "未提及的过滤字段 `status`"
+    m = re.search(r'未提及的过滤字段\s*[`\'"]?(\w+)[`\'"]?', error_msg)
+    if m:
+        fields.append(m.group(1))
+    return list(dict.fromkeys(fields))  # 去重保序
+
+
+def _run_validations(sql: str, datasource_id: int, question: str, dialect: str) -> str:
+    """运行全部 SQL 校验链，通过后应用中文字段别名并返回最终 SQL；失败抛异常。"""
+    validate_sql(sql, dialect)
+    _check_tables_exist(sql, datasource_id)
+    _check_columns_exist(sql, datasource_id)
+    _check_cte_alias_scope(sql)
+    _check_id_display(sql, datasource_id)
+    shape_err = _count_shape_error(sql, None)
+    if shape_err:
+        raise ValueError(shape_err)
+    filter_err = _unexpected_filter_error(sql, question)
+    if filter_err:
+        raise ValueError(filter_err)
+    ratio_err = _ratio_denominator_error(sql, question, None)
+    if ratio_err:
+        raise ValueError(ratio_err)
+    return _apply_column_aliases(sql, datasource_id)
+
+
 def generate_sql(datasource_id: int, workspace_id: int, question: str,
                  history: list[dict] | None = None,
                  llm: LLMClient | None = None,
@@ -1076,13 +1149,8 @@ def generate_sql(datasource_id: int, workspace_id: int, question: str,
         if not ds:
             raise LLMError("数据源不存在")
         dialect = ds.type
-        _hints = ((spec_context or {}).get("spec") or {}).get("table_hints") or []
-        _spec_d = (spec_context or {}).get("spec") or {}
-        _target = []
-        for _m in (_spec_d.get("metrics") or []) + (_spec_d.get("dimensions") or []):
-            _n = _m.get("name")
-            if _n and _n not in _target:
-                _target.append(_n)
+        _hints: list[str] = []
+        _target: list[str] = []
         try:
             tables, select_meta = _llm_select_tables(
                 datasource_id, question, llm=llm, history=history,
@@ -1135,7 +1203,7 @@ def generate_sql(datasource_id: int, workspace_id: int, question: str,
         # spec 已映射字段（mapping）与检索命中字段（hint_evidence）→ 优先推荐 + schema 分层
         _preferred: set[str] = set()
         _recommend_lines: list[str] = []
-        _mapping = (spec_context or {}).get("mapping") or {}
+        _mapping: dict = {}
         for _m in (_mapping.get("metrics") or []) + (_mapping.get("dimensions") or []):
             col = _m.get("column") or ""
             cmt = _m.get("comment") or ""
@@ -1279,7 +1347,7 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
         user_prompt += f"""
 【上次执行失败，必须修正】
 {exec_error}
-请分析错误原因并修正 SQL：**保持用户问题的查询语义不变**（项目/时间/状态等过滤条件、分组维度、计数/聚合形态都不得删减或改变），只修正报错本身；只使用【可用表与字段】中确切存在的表名和字段；聚合查询中 GROUP BY 必须包含 SELECT 中全部非聚合列（注意 only_full_group_by 模式）；若错误为 Subquery returns more than 1 row，必须把 `= (SELECT ...)` 改为 `IN (SELECT ...)`；若错误为 Column 'xxx' in field list is ambiguous（列名歧义），必须为 SELECT、ORDER BY、WHERE、GROUP BY 中的重名列显式加上表别名限定（如 stat_a.xxx、stat_b.xxx），并保证 JOIN 条件与 SELECT 列使用同一别名；若错误为 CTE 作用域错误（某字段已在 CTE 中被别名化），必须将后续查询中对该原始列名的引用全部替换为 CTE 输出的别名；若错误为字段不存在（尤其是 is_deleted 等软删字段），必须直接删除 SQL 中所有对该字段的引用（如 WHERE 条件），不要尝试用其他字段替代；修正后**仅输出**修正后的 ```sql 代码块（含必要注释）。"""
+请分析错误原因并修正 SQL：**保持用户问题的查询语义不变**（项目/时间/状态等过滤条件、分组维度、计数/聚合形态都不得删减或改变），只修正报错本身；只使用【可用表与字段】中确切存在的表名和字段；聚合查询中 GROUP BY 必须包含 SELECT 中全部非聚合列（注意 only_full_group_by 模式）；若错误为 Subquery returns more than 1 row，必须把 `= (SELECT ...)` 改为 `IN (SELECT ...)`；若错误为 Column 'xxx' in field list is ambiguous（列名歧义），必须为 SELECT、ORDER BY、WHERE、GROUP BY 中的重名列显式加上表别名限定（如 stat_a.xxx、stat_b.xxx），并保证 JOIN 条件与 SELECT 列使用同一别名；若错误为 CTE 作用域错误（某字段已在 CTE 中被别名化），必须将后续查询中对该原始列名的引用全部替换为 CTE 输出的别名；若错误为字段不存在（尤其是 is_deleted 等软删字段），必须直接删除 SQL 中所有对该字段的引用（如 WHERE 条件），不要尝试用其他字段替代；若错误为 Not unique table/alias（表别名重复），必须为 FROM/JOIN 中的每个表分配唯一别名（如 t1、t2、sub_a、sub_b），并同步更新 SELECT/WHERE/GROUP BY/ORDER BY/JOIN ON 中对该别名的所有列引用；修正后**仅输出**修正后的 ```sql 代码块（含必要注释）。"""
 
     client = llm
     if client is None or not client.configured:
@@ -1361,21 +1429,7 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
         # 校验 SQL（语法/只读/表存在/字段存在/计数形状），通过则应用中文字段别名
         logger.info("[NL2SQL] 提取后SQL前300字: %s", sql[:300])
         try:
-            validate_sql(sql, dialect)
-            _check_tables_exist(sql, datasource_id)
-            _check_columns_exist(sql, datasource_id)
-            _check_cte_alias_scope(sql)
-            _check_id_display(sql, datasource_id)
-            shape_err = _count_shape_error(sql, spec_context)
-            if shape_err:
-                raise ValueError(shape_err)
-            filter_err = _unexpected_filter_error(sql, question)
-            if filter_err:
-                raise ValueError(filter_err)
-            ratio_err = _ratio_denominator_error(sql, question, spec_context)
-            if ratio_err:
-                raise ValueError(ratio_err)
-            sql = _apply_column_aliases(sql, datasource_id)
+            sql = _run_validations(sql, datasource_id, question, dialect)
             yield {"type": "result", "result": {
                 "intent": "query", "sql": sql,
                 "explain": content, "tables": [t.table_name for t in tables],
@@ -1386,6 +1440,23 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
             logger.warning("[NL2SQL] 校验失败原因: %s | 异常类型: %s", last_error[:200], type(exc).__name__)
+            # 确定性自动修复：字段不存在 / 未提及过滤字段 → 直接移除对应 WHERE 条件，无需 LLM 重试
+            bad_fields = _extract_bad_fields(last_error)
+            if bad_fields:
+                fixed_sql = _auto_strip_invalid_filters(sql, bad_fields)
+                if fixed_sql != sql:
+                    try:
+                        fixed_sql = _run_validations(fixed_sql, datasource_id, question, dialect)
+                        logger.info("[NL2SQL] 确定性自动修复成功: 移除字段 %s, 校验通过", bad_fields)
+                        yield {"type": "result", "result": {
+                            "intent": "query", "sql": fixed_sql,
+                            "explain": content, "tables": [t.table_name for t in tables],
+                            "selected_tables": select_meta.get("raw", []),
+                            "select_source": select_meta.get("source", ""),
+                            "rag_hits": _rag_hits}}
+                        return
+                    except Exception:  # noqa: BLE001
+                        logger.info("[NL2SQL] 确定性自动修复后仍校验失败，回退 LLM 重试")
             yield {"type": "retry", "msg": "SQL 校验中，正在修正…"}
             messages.append({"role": "assistant", "content": content})
             messages.append({"role": "user",
@@ -1696,7 +1767,7 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
         user_prompt += f"""
 【上次执行失败，必须修正】
 {exec_error}
-请分析错误原因并修正 SQL：**保持用户问题的查询语义不变**（项目/时间/状态等过滤条件、分组维度、计数/聚合形态都不得删减或改变），只修正报错本身；只使用【可用表与字段】中确切存在的表名和字段；聚合查询中 GROUP BY 必须包含 SELECT 中全部非聚合列（注意 only_full_group_by 模式）；若错误为 Subquery returns more than 1 row，必须把 `= (SELECT ...)` 改为 `IN (SELECT ...)`；若错误为 Column 'xxx' in field list is ambiguous（列名歧义），必须为 SELECT、ORDER BY、WHERE、GROUP BY 中的重名列显式加上表别名限定（如 stat_a.xxx、stat_b.xxx），并保证 JOIN 条件与 SELECT 列使用同一别名；若错误为 CTE 作用域错误（某字段已在 CTE 中被别名化），必须将后续查询中对该原始列名的引用全部替换为 CTE 输出的别名；若错误为字段不存在（尤其是 is_deleted 等软删字段），必须直接删除 SQL 中所有对该字段的引用（如 WHERE 条件），不要尝试用其他字段替代；修正后**仅输出**修正后的 ```sql 代码块（含必要注释）。"""
+请分析错误原因并修正 SQL：**保持用户问题的查询语义不变**（项目/时间/状态等过滤条件、分组维度、计数/聚合形态都不得删减或改变），只修正报错本身；只使用【可用表与字段】中确切存在的表名和字段；聚合查询中 GROUP BY 必须包含 SELECT 中全部非聚合列（注意 only_full_group_by 模式）；若错误为 Subquery returns more than 1 row，必须把 `= (SELECT ...)` 改为 `IN (SELECT ...)`；若错误为 Column 'xxx' in field list is ambiguous（列名歧义），必须为 SELECT、ORDER BY、WHERE、GROUP BY 中的重名列显式加上表别名限定（如 stat_a.xxx、stat_b.xxx），并保证 JOIN 条件与 SELECT 列使用同一别名；若错误为 CTE 作用域错误（某字段已在 CTE 中被别名化），必须将后续查询中对该原始列名的引用全部替换为 CTE 输出的别名；若错误为字段不存在（尤其是 is_deleted 等软删字段），必须直接删除 SQL 中所有对该字段的引用（如 WHERE 条件），不要尝试用其他字段替代；若错误为 Not unique table/alias（表别名重复），必须为 FROM/JOIN 中的每个表分配唯一别名（如 t1、t2、sub_a、sub_b），并同步更新 SELECT/WHERE/GROUP BY/ORDER BY/JOIN ON 中对该别名的所有列引用；修正后**仅输出**修正后的 ```sql 代码块（含必要注释）。"""
 
     client = llm
     if client is None or not client.configured:
@@ -1778,21 +1849,7 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
         # 校验 SQL（语法/只读/表存在/字段存在/计数形状），通过则应用中文字段别名
         logger.info("[NL2SQL] 提取后SQL前300字: %s", sql[:300])
         try:
-            validate_sql(sql, dialect)
-            _check_tables_exist(sql, datasource_id)
-            _check_columns_exist(sql, datasource_id)
-            _check_cte_alias_scope(sql)
-            _check_id_display(sql, datasource_id)
-            shape_err = _count_shape_error(sql, spec_context)
-            if shape_err:
-                raise ValueError(shape_err)
-            filter_err = _unexpected_filter_error(sql, question)
-            if filter_err:
-                raise ValueError(filter_err)
-            ratio_err = _ratio_denominator_error(sql, question, spec_context)
-            if ratio_err:
-                raise ValueError(ratio_err)
-            sql = _apply_column_aliases(sql, datasource_id)
+            sql = _run_validations(sql, datasource_id, question, dialect)
             yield {"type": "result", "result": {
                 "intent": "query", "sql": sql,
                 "explain": content, "tables": [t.table_name for t in tables],
@@ -1803,6 +1860,23 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
             logger.warning("[NL2SQL] 校验失败原因: %s | 异常类型: %s", last_error[:200], type(exc).__name__)
+            # 确定性自动修复：字段不存在 / 未提及过滤字段 → 直接移除对应 WHERE 条件，无需 LLM 重试
+            bad_fields = _extract_bad_fields(last_error)
+            if bad_fields:
+                fixed_sql = _auto_strip_invalid_filters(sql, bad_fields)
+                if fixed_sql != sql:
+                    try:
+                        fixed_sql = _run_validations(fixed_sql, datasource_id, question, dialect)
+                        logger.info("[NL2SQL] 确定性自动修复成功: 移除字段 %s, 校验通过", bad_fields)
+                        yield {"type": "result", "result": {
+                            "intent": "query", "sql": fixed_sql,
+                            "explain": content, "tables": [t.table_name for t in tables],
+                            "selected_tables": select_meta.get("raw", []),
+                            "select_source": select_meta.get("source", ""),
+                            "rag_hits": _rag_hits}}
+                        return
+                    except Exception:  # noqa: BLE001
+                        logger.info("[NL2SQL] 确定性自动修复后仍校验失败，回退 LLM 重试")
             yield {"type": "retry", "msg": "SQL 校验中，正在修正…"}
             messages.append({"role": "assistant", "content": content})
             messages.append({"role": "user",

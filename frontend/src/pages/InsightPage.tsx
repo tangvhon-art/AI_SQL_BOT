@@ -1,9 +1,12 @@
 // 洞察分析：六步向导
-import { useState } from 'react'
-import { Button, Card, Input, Select, Steps, Space, List, Tag, Switch, message, Modal, Empty, Spin } from 'antd'
-import { ThunderboltOutlined, SaveOutlined, PlayCircleOutlined } from '@ant-design/icons'
+import { useEffect, useRef, useState } from 'react'
+import { Button, Card, Input, Select, Steps, Space, List, Tag, Switch, message, Modal, Empty, Spin, Collapse, Alert } from 'antd'
+import { ThunderboltOutlined, SaveOutlined, PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
+import * as echarts from 'echarts'
 import { client } from '../api/client'
+import { buildChartOption } from '../utils/chart-factory'
+import type { ChartDataset, ChartType } from '../types/chart'
 
 const { TextArea } = Input
 
@@ -13,6 +16,28 @@ interface InsightItem {
   question: string
   chart_type: string
   enabled: boolean
+}
+
+interface PreviewCard {
+  id: string
+  title: string
+  question: string
+  chart_type: string
+  sql: string
+  columns: string[]
+  rows: any[][]
+  status: 'pending' | 'success' | 'error'
+  error: string
+}
+
+interface InsightTemplateItem {
+  id: number
+  name: string
+  description: string
+  purpose: string
+  datasource_id: number
+  config: { purpose: string; datasource_id: number; model_id?: number | null; items: InsightItem[] }
+  created_at: string
 }
 
 const CHART_OPTIONS = [
@@ -32,7 +57,17 @@ export default function InsightPage() {
   const [items, setItems] = useState<InsightItem[]>([])
   const [loading, setLoading] = useState(false)
   const [templateName, setTemplateName] = useState('')
-  const [saveModalOpen, setSaveModalOpen] = useState(false)
+  const [previewCards, setPreviewCards] = useState<PreviewCard[]>([])
+  const [previewLoading, setPreviewLoading] = useState(false)
+  // 模型选择
+  const [modelId, setModelId] = useState<number | null>(null)
+  const [models, setModels] = useState<any[]>([])
+  // 列表视图
+  const [viewMode, setViewMode] = useState<'list' | 'wizard'>('list')
+  const [templates, setTemplates] = useState<InsightTemplateItem[]>([])
+  const [templateLoading, setTemplateLoading] = useState(false)
+  const [editingTemplate, setEditingTemplate] = useState<InsightTemplateItem | null>(null)
+  const [templateSearch, setTemplateSearch] = useState('')
 
   // 加载数据源
   const loadDatasources = async () => {
@@ -40,6 +75,117 @@ export default function InsightPage() {
       const r = await client.get('/datasources')
       setDatasources(r.data.items || r.data || [])
     } catch {}
+  }
+
+  // 加载可用模型
+  const loadModels = async () => {
+    try {
+      const r = await client.get('/models', { params: { scene: 'sql', size: 50 } })
+      const list = r.data.items || r.data || []
+      setModels(list)
+      // 默认选第一个启用的模型
+      const defaultModel = list.find((m: any) => m.enabled !== false) || list[0]
+      if (defaultModel && !modelId) setModelId(defaultModel.id)
+    } catch {}
+  }
+
+  // 加载模板列表
+  const loadTemplates = async () => {
+    setTemplateLoading(true)
+    try {
+      const r = await client.get('/insight/templates')
+      setTemplates(r.data.items || [])
+    } catch {
+      setTemplates([])
+    } finally {
+      setTemplateLoading(false)
+    }
+  }
+
+  // 进入列表视图时加载模板和数据源
+  useEffect(() => {
+    if (viewMode === 'list') { loadTemplates(); loadDatasources() }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode])
+
+  // 数据源ID → 名称
+  const dsName = (id: number) => {
+    const ds = datasources.find(d => d.id === id)
+    return ds ? (ds.name || ds.database_name || `数据源 ${id}`) : `数据源 ${id}`
+  }
+
+  // 搜索过滤
+  const filteredTemplates = templates.filter(tpl => {
+    const kw = templateSearch.trim().toLowerCase()
+    if (!kw) return true
+    return (tpl.name || '').toLowerCase().includes(kw) ||
+           (tpl.purpose || '').toLowerCase().includes(kw) ||
+           (tpl.description || '').toLowerCase().includes(kw)
+  })
+
+  // 新建向导
+  const startNewWizard = () => {
+    setEditingTemplate(null)
+    setCurrent(0)
+    setPurpose('')
+    setDatasourceId(null)
+    setModelId(null)
+    setItems([])
+    setPreviewCards([])
+    setTemplateName('')
+    setViewMode('wizard')
+    loadDatasources()
+    loadModels()
+  }
+
+  // 编辑模板：加载配置到向导
+  const handleEditTemplate = (tpl: InsightTemplateItem) => {
+    setEditingTemplate(tpl)
+    const cfg = tpl.config || { purpose: '', datasource_id: 0, items: [] }
+    setPurpose(cfg.purpose || tpl.purpose || '')
+    setDatasourceId(cfg.datasource_id || tpl.datasource_id)
+    setModelId(cfg.model_id || null)
+    setItems((cfg.items || []).map((i: any) => ({ ...i, enabled: i.enabled !== false })))
+    setTemplateName(tpl.name)
+    setPreviewCards([])
+    setCurrent(3)
+    setViewMode('wizard')
+    loadDatasources()
+    loadModels()
+  }
+
+  // 从模板直接生成报告
+  const handleGenerateFromTemplate = async (tpl: InsightTemplateItem) => {
+    const cfg = tpl.config || { purpose: '', datasource_id: 0, items: [] }
+    const enabled = (cfg.items || []).filter((i: any) => i.enabled !== false)
+    if (!enabled.length) { message.warning('该模板没有启用的分析项'); return }
+    setLoading(true)
+    try {
+      const r = await client.post('/insight/execute', {
+        config: { ...cfg, items: enabled },
+        template_id: tpl.id,
+      })
+      message.success('报告已生成')
+      navigate(`/reports`)
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '报告生成失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // 删除模板
+  const handleDeleteTemplate = (tpl: InsightTemplateItem) => {
+    Modal.confirm({
+      title: '删除模板',
+      content: `确定删除模板「${tpl.name}」吗？此操作不可恢复。`,
+      okText: '删除', okType: 'danger',
+      onOk: async () => {
+        await client.delete(`/insight/templates/${tpl.id}`)
+        message.success('模板已删除')
+        loadTemplates()
+      },
+    })
   }
 
   const steps = [
@@ -56,7 +202,7 @@ export default function InsightPage() {
     if (!datasourceId) { message.warning('请选择数据源'); return }
     setLoading(true)
     try {
-      const r = await client.post('/insight/generate-draft', { purpose, datasource_id: datasourceId })
+      const r = await client.post('/insight/generate-draft', { purpose, datasource_id: datasourceId, model_id: modelId })
       setItems(r.data.config.items || [])
       setCurrent(3)
       message.success('草案已生成')
@@ -82,12 +228,15 @@ export default function InsightPage() {
 
   const handleSaveTemplate = async () => {
     if (!templateName.trim()) { message.warning('请输入模板名称'); return }
-    await client.post('/insight/save-template', {
-      config: { purpose, datasource_id: datasourceId, items },
-      name: templateName,
-    })
-    message.success('模板已保存')
-    setSaveModalOpen(false)
+    const config = { purpose, datasource_id: datasourceId, model_id: modelId, items }
+    if (editingTemplate) {
+      await client.put(`/insight/templates/${editingTemplate.id}`, { config, name: templateName })
+      message.success('模板已更新')
+    } else {
+      await client.post('/insight/save-template', { config, name: templateName })
+      message.success('模板已保存')
+    }
+    setViewMode('list')
   }
 
   const toggleItem = (id: string) => {
@@ -98,9 +247,116 @@ export default function InsightPage() {
     setItems(prev => prev.map(i => i.id === id ? { ...i, [field]: value } : i))
   }
 
+  // columns(字符串数组) + rows(二维数组) → ChartDataset
+  const toChartDataset = (columns: string[], rows: any[][]): ChartDataset => {
+    const objRows = rows.map(r => {
+      const o: Record<string, any> = {}
+      columns.forEach((c, i) => { o[c] = r[i] })
+      return o
+    })
+    // 第一列作维度，其余数值列作指标
+    const dimensions = columns.length ? [columns[0]] : []
+    const metrics = columns.slice(1).filter(c => {
+      const vals = objRows.map(r => r[c]).filter(v => v !== null && v !== undefined)
+      return vals.length > 0 && vals.every(v => typeof v === 'number' || !isNaN(Number(v)))
+    })
+    return { dimensions, metrics: metrics.length ? metrics : columns.slice(1), rows: objRows }
+  }
+
+  const handlePreview = async () => {
+    const enabled = items.filter(i => i.enabled)
+    if (!enabled.length) { message.warning('至少启用一个分析项'); return }
+    setPreviewLoading(true)
+    try {
+      const r = await client.post('/insight/preview', {
+        config: { purpose, datasource_id: datasourceId, model_id: modelId, items: enabled.map(i => ({ ...i })) },
+      })
+      setPreviewCards(r.data.cards || [])
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '预览生成失败')
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
+
+  // 进入预览步骤时自动触发
+  useEffect(() => {
+    if (current === 4 && previewCards.length === 0 && !previewLoading) {
+      handlePreview()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current])
+
+  // ============ 列表视图 ============
+  if (viewMode === 'list') {
+    return (
+      <div style={{ padding: 16, maxWidth: 1100, margin: '0 auto' }}>
+        <Card
+          title={<Space><span style={{ fontSize: 16, fontWeight: 600 }}>洞察分析</span><Tag color="purple">模板列表</Tag></Space>}
+          extra={<Button type="primary" icon={<ThunderboltOutlined />} onClick={startNewWizard}>新建洞察</Button>}
+        >
+          {templateLoading ? (
+            <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div>
+          ) : (
+            <>
+              <div style={{ marginBottom: 16 }}>
+                <Input.Search
+                  placeholder="搜索模板名称 / 分析目的"
+                  value={templateSearch}
+                  onChange={e => setTemplateSearch(e.target.value)}
+                  onClear={() => setTemplateSearch('')}
+                  allowClear
+                  style={{ maxWidth: 360 }}
+                />
+              </div>
+              {filteredTemplates.length === 0 ? (
+                <Empty description={templateSearch ? `未找到匹配「${templateSearch}」的模板` : '暂无保存的模板，点击「新建洞察」创建第一个分析模板'} style={{ padding: '40px 0' }} />
+              ) : (
+                <List
+                  dataSource={filteredTemplates}
+                  renderItem={tpl => (
+                    <List.Item
+                      actions={[
+                        <Button key="gen" type="primary" size="small" icon={<PlayCircleOutlined />}
+                          loading={loading} onClick={() => handleGenerateFromTemplate(tpl)}>生成报告</Button>,
+                        <Button key="edit" size="small" onClick={() => handleEditTemplate(tpl)}>编辑</Button>,
+                        <Button key="del" size="small" danger onClick={() => handleDeleteTemplate(tpl)}>删除</Button>,
+                      ]}
+                    >
+                      <List.Item.Meta
+                        title={<Space>{tpl.name}<Tag color="blue">{(tpl.config?.items || []).length} 项</Tag></Space>}
+                        description={
+                          <div>
+                            <div style={{ color: '#595959', marginBottom: 4 }}>{tpl.purpose || tpl.description || '—'}</div>
+                            <div style={{ fontSize: 12, color: '#8c8c8c' }}>
+                              数据源: {dsName(tpl.datasource_id)} · 创建: {tpl.created_at ? new Date(tpl.created_at).toLocaleString('zh-CN') : '—'}
+                            </div>
+                          </div>
+                        }
+                      />
+                    </List.Item>
+                  )}
+                />
+              )}
+            </>
+          )}
+        </Card>
+      </div>
+    )
+  }
+
+  // ============ 向导视图 ============
   return (
     <div style={{ padding: 16, maxWidth: 960, margin: '0 auto' }}>
-      <Card title="洞察分析" extra={<Tag color="purple">六步向导</Tag>}>
+      <Card
+        title={
+          <Space>
+            <span style={{ fontSize: 16, fontWeight: 600 }}>{editingTemplate ? '编辑洞察模板' : '新建洞察分析'}</span>
+            <Tag color="purple">六步向导</Tag>
+          </Space>
+        }
+        extra={<Button onClick={() => setViewMode('list')}>返回列表</Button>}
+      >
         <Steps current={current} items={steps} style={{ marginBottom: 24 }} />
 
         {/* Step 0: 描述目的 */}
@@ -125,17 +381,23 @@ export default function InsightPage() {
               options={datasources.map(d => ({ value: d.id, label: d.name || d.database_name }))} />
             <div style={{ marginTop: 16, display: 'flex', justifyContent: 'space-between' }}>
               <Button onClick={() => setCurrent(0)}>上一步</Button>
-              <Button type="primary" disabled={!datasourceId} onClick={() => setCurrent(2)}>下一步</Button>
+              <Button type="primary" disabled={!datasourceId} onClick={() => { loadModels(); setCurrent(2) }}>下一步</Button>
             </div>
           </div>
         )}
 
         {/* Step 2: AI生成草案 */}
         {current === 2 && (
-          <div style={{ textAlign: 'center', padding: 40 }}>
+          <div style={{ textAlign: 'center', padding: '40px 20px' }}>
             <ThunderboltOutlined style={{ fontSize: 48, color: '#6C5CE7' }} />
-            <h3>AI 正在生成分析草案</h3>
+            <h3>AI 生成分析草案</h3>
             <p style={{ color: '#8c8c8c' }}>根据「{purpose}」自动设计分析项</p>
+            <div style={{ maxWidth: 400, margin: '0 auto 24px', textAlign: 'left' }}>
+              <div style={{ fontSize: 13, color: '#595959', marginBottom: 6 }}>选择生成模型</div>
+              <Select style={{ width: '100%' }} value={modelId} onChange={setModelId}
+                placeholder="选择大模型"
+                options={models.map((m: any) => ({ value: m.id, label: m.name || m.model_name }))} />
+            </div>
             <Button type="primary" size="large" loading={loading} icon={<ThunderboltOutlined />} onClick={handleGenerateDraft}>
               生成分析草案
             </Button>
@@ -168,10 +430,7 @@ export default function InsightPage() {
             />
             <div style={{ marginTop: 16, display: 'flex', justifyContent: 'space-between' }}>
               <Button onClick={() => setCurrent(2)}>上一步</Button>
-              <Space>
-                <Button onClick={() => setCurrent(4)}>预览报告</Button>
-                <Button type="primary" onClick={handleExecute} icon={<PlayCircleOutlined />}>生成报告</Button>
-              </Space>
+              <Button type="primary" onClick={() => setCurrent(4)}>预览报告</Button>
             </div>
           </div>
         )}
@@ -179,14 +438,24 @@ export default function InsightPage() {
         {/* Step 4: 预览 */}
         {current === 4 && (
           <div>
-            <h3>报告预览</h3>
-            <Empty description="预览功能开发中，点击「生成报告」直接生成完整报告" />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h3 style={{ margin: 0 }}>报告预览</h3>
+              <Button icon={<ReloadOutlined />} loading={previewLoading} onClick={handlePreview}>重新预览</Button>
+            </div>
+            {previewLoading ? (
+              <div style={{ textAlign: 'center', padding: 60 }}><Spin size="large" tip="正在执行查询并生成预览…" /></div>
+            ) : previewCards.length === 0 ? (
+              <Empty description="暂无预览数据" />
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                {previewCards.map((card, idx) => (
+                  <PreviewChartCard key={card.id} card={card} index={idx} toChartDataset={toChartDataset} />
+                ))}
+              </div>
+            )}
             <div style={{ marginTop: 16, display: 'flex', justifyContent: 'space-between' }}>
-              <Button onClick={() => setCurrent(3)}>上一步</Button>
-              <Space>
-                <Button onClick={() => setSaveModalOpen(true)} icon={<SaveOutlined />}>保存为模板</Button>
-                <Button type="primary" loading={loading} onClick={handleExecute} icon={<PlayCircleOutlined />}>生成报告</Button>
-              </Space>
+              <Button onClick={() => { setPreviewCards([]); setCurrent(3) }}>上一步</Button>
+              <Button type="primary" onClick={() => setCurrent(5)} icon={<SaveOutlined />}>保存为模板</Button>
             </div>
           </div>
         )}
@@ -198,15 +467,102 @@ export default function InsightPage() {
             <p style={{ color: '#8c8c8c' }}>保存后可在模板列表中重复使用此配置生成报告</p>
             <Input value={templateName} onChange={e => setTemplateName(e.target.value)}
               placeholder="模板名称" style={{ width: 300, marginBottom: 16 }} />
-            <div><Button type="primary" onClick={handleSaveTemplate} icon={<SaveOutlined />}>保存模板</Button></div>
+            <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
+              <Button onClick={() => setCurrent(4)}>上一步</Button>
+              <Button type="primary" onClick={handleSaveTemplate} icon={<SaveOutlined />}>保存模板</Button>
+            </div>
           </div>
         )}
       </Card>
-
-      <Modal title="保存为模板" open={saveModalOpen} onCancel={() => setSaveModalOpen(false)}
-        onOk={handleSaveTemplate} okText="保存">
-        <Input value={templateName} onChange={e => setTemplateName(e.target.value)} placeholder="模板名称" />
-      </Modal>
     </div>
+  )
+}
+
+/** 预览图表卡片：ECharts 渲染 + 折叠 SQL + 错误展示 */
+function PreviewChartCard({ card, index, toChartDataset }: {
+  card: PreviewCard
+  index: number
+  toChartDataset: (cols: string[], rows: any[][]) => ChartDataset
+}) {
+  const chartRef = useRef<HTMLDivElement>(null)
+  const instRef = useRef<echarts.ECharts | null>(null)
+
+  useEffect(() => {
+    if (card.status !== 'success' || !card.columns.length || !chartRef.current) return
+    if (!instRef.current) {
+      instRef.current = echarts.init(chartRef.current)
+    }
+    const dataset = toChartDataset(card.columns, card.rows)
+    try {
+      const option = buildChartOption(card.chart_type as ChartType, dataset)
+      instRef.current.setOption(option, true)
+    } catch {
+      instRef.current.clear()
+    }
+    const onResize = () => instRef.current?.resize()
+    window.addEventListener('resize', onResize)
+    return () => { window.removeEventListener('resize', onResize) }
+  }, [card, toChartDataset])
+
+  useEffect(() => {
+    return () => { instRef.current?.dispose(); instRef.current = null }
+  }, [])
+
+  const isTable = card.chart_type === 'table'
+  const isKpi = card.chart_type === 'kpi'
+
+  return (
+    <Card
+      size="small"
+      title={
+        <Space>
+          <span style={{ fontWeight: 600 }}>{index + 1}. {card.title}</span>
+          <Tag color={card.status === 'success' ? 'green' : 'red'}>{card.status === 'success' ? '成功' : '失败'}</Tag>
+          <Tag>{card.chart_type}</Tag>
+        </Space>
+      }
+      style={{ height: '100%' }}
+    >
+      {card.status === 'error' ? (
+        <Alert type="error" message={card.error || '执行失败'} showIcon style={{ marginBottom: 8 }} />
+      ) : isKpi ? (
+        (() => {
+          const valIdx = card.columns.length > 1 ? 1 : 0
+          const dimIdx = 0
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '24px 16px', minHeight: 160 }}>
+              <div style={{ fontSize: 36, fontWeight: 700, color: '#6C5CE7' }}>
+                {card.rows[0]?.[valIdx] ?? '—'}
+              </div>
+              <div style={{ fontSize: 14, color: '#8c8c8c', marginTop: 8 }}>{card.columns[valIdx] || '数值'}</div>
+              {card.columns[dimIdx] && card.rows[0]?.[dimIdx] != null && (
+                <div style={{ fontSize: 12, color: '#595959', marginTop: 4 }}>{String(card.rows[0][dimIdx])}</div>
+              )}
+            </div>
+          )
+        })()
+      ) : isTable ? (
+        <div style={{ overflowX: 'auto', maxHeight: 360, width: '100%' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, tableLayout: 'fixed' }}>
+            <thead>
+              <tr>{card.columns.map(c => <th key={c} style={{ border: '1px solid #f0f0f0', padding: '6px 10px', background: '#fafafa', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c}</th>)}</tr>
+            </thead>
+            <tbody>
+              {card.rows.slice(0, 50).map((r, i) => (
+                <tr key={i}>{r.map((v, j) => <td key={j} style={{ border: '1px solid #f0f0f0', padding: '6px 10px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 200 }}>{String(v ?? '')}</td>)}</tr>
+              ))}
+            </tbody>
+          </table>
+          {card.rows.length > 50 && <div style={{ fontSize: 11, color: '#999', marginTop: 4 }}>仅显示前 50 行，共 {card.rows.length} 行</div>}
+        </div>
+      ) : (
+        <div ref={chartRef} style={{ width: '100%', height: 320 }} />
+      )}
+      {card.sql && (
+        <Collapse ghost size="small" style={{ marginTop: 8 }}
+          items={[{ key: 'sql', label: <span style={{ fontSize: 12, color: '#8c8c8c' }}>查看 SQL</span>,
+            children: <pre style={{ fontSize: 11, background: '#f6f8fa', padding: 8, borderRadius: 4, overflowX: 'auto', margin: 0, maxHeight: 160 }}>{card.sql}</pre> }]} />
+      )}
+    </Card>
   )
 }

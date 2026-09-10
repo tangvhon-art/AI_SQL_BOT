@@ -236,6 +236,46 @@ class MultiQueryDecomposer:
         cls._rules.append(rule)
         cls._rules.sort(key=lambda r: getattr(r, "_priority", 0), reverse=True)
 
+    def decompose_questions(self, question: str) -> list[str]:
+        """轻量拆解：仅规则链 → LLM 兜底 → 智能降级，返回子问题文本列表。
+        不做要素补齐、选表探测等后续逻辑。单查询时返回长度=1。"""
+        logger.info("[多查询拆解][轻量] 原始问题: %s", question[:120])
+        sub_questions: list[str] | None = None
+        # 1. 规则链
+        for rule in self._rules:
+            if rule.match(question):
+                sub_questions = rule.decompose(question)
+                if sub_questions and len(sub_questions) >= 2:
+                    logger.info("[多查询拆解][轻量] 规则 %s 命中: %s", type(rule).__name__, sub_questions)
+                    break
+                sub_questions = None
+        # 2. LLM 兜底
+        if not sub_questions or len(sub_questions) < 2:
+            sub_questions = self._llm_decompose(question)
+            if sub_questions and len(sub_questions) >= 2:
+                logger.info("[多查询拆解][轻量] LLM 兜底: %s", sub_questions)
+        # 3. 智能降级
+        if (not sub_questions or len(sub_questions) < 2):
+            _metric_words = ("数量", "金额", "销售额", "订单量", "客单价", "占比", "增长率",
+                             "趋势", "排行", "排名", "分布", "统计", "对比", "平均", "总量",
+                             "发起量", "流程数", "审批量", "处理量", "通过量", "驳回量",
+                             "完成量", "新增量", "增长量", "下降量", "最大值", "最小值",
+                             "个数", "次数", "人数", "笔数", "件数", "总数", "多少", "几个")
+            _hits = sum(1 for w in _metric_words if w in question)
+            if _hits >= 2:
+                _parts = [p.strip("，,。.；; \t") for p in re.split(r"[，,。.；;]", question)
+                          if p.strip("，,。.；; \t") and len(p.strip("，,。.；; \t")) > 6]
+                _parts = [_clean_sub_question(p) for p in _parts]
+                if len(_parts) >= 2 and all(any(w in p for w in _metric_words) for p in _parts):
+                    sub_questions = _parts
+                    logger.info("[多查询拆解][轻量] 智能降级: %s", _parts)
+        # 4. 单查询兼容
+        if not sub_questions:
+            sub_questions = [question]
+        result = [q.strip() for q in sub_questions if q.strip()]
+        logger.info("[多查询拆解][轻量] 最终 %d 个子问题", len(result))
+        return result
+
     def decompose(self, question: str, workspace_id: int = 0,
                   datasource_id: int = 0, parent_spec: Any | None = None,
                   task_id: str = "") -> MultiQuerySpec:
