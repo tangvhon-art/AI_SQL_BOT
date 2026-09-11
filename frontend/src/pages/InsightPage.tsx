@@ -85,6 +85,7 @@ export default function InsightPage() {
   const [scheduleCron, setScheduleCron] = useState('0 9 * * *')
   const [scheduleTemplateId, setScheduleTemplateId] = useState<number | null>(null)
   const [scheduleSubmitting, setScheduleSubmitting] = useState(false)
+  const [scheduleSearch, setScheduleSearch] = useState('')
   const scheduleInputRef = useRef<any>(null)
 
   // 加载数据源
@@ -158,6 +159,7 @@ export default function InsightPage() {
       })
       message.success('定时任务创建成功')
       setScheduleModalOpen(false)
+      setActiveTab('schedules')
       loadSchedules()
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '创建失败')
@@ -187,8 +189,14 @@ export default function InsightPage() {
     }
   }
 
-  const handleRunScheduleNow = async (sched: any) => {
-    try {
+  const filteredSchedules = schedules.filter(s => {
+    const kw = scheduleSearch.trim().toLowerCase()
+    if (!kw) return true
+    return (s.name || '').toLowerCase().includes(kw) ||
+           (s.cron_expr || '').toLowerCase().includes(kw)
+  })
+
+  const handleRunScheduleNow = async (sched: any) => {    try {
       message.loading({ content: '正在执行...', key: 'run-sched', duration: 0 })
       const r = await client.post(`/insight/schedules/${sched.id}/run`)
       message.destroy('run-sched')
@@ -457,19 +465,26 @@ export default function InsightPage() {
                 label: <span><ClockCircleOutlined style={{ marginRight: 6 }} />定时任务</span>,
                 children: (
                   <div>
-                    <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ color: '#8c8c8c', fontSize: 13 }}>按 CRON 表达式定时执行洞察分析，结果自动保存至报告中心</span>
+                    <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                      <Input.Search
+                        placeholder="搜索任务名称 / CRON"
+                        value={scheduleSearch}
+                        onChange={e => setScheduleSearch(e.target.value)}
+                        onClear={() => setScheduleSearch('')}
+                        allowClear
+                        style={{ maxWidth: 300 }}
+                      />
                       <Button type="primary" icon={<PlusOutlined />} onClick={() => openScheduleModal()} disabled={templates.length === 0}>
                         新建定时任务
                       </Button>
                     </div>
                     {scheduleLoading ? (
                       <div style={{ textAlign: 'center', padding: 40 }}><Spin /></div>
-                    ) : schedules.length === 0 ? (
-                      <Empty description="暂无定时任务，点击「新建定时任务」创建" style={{ padding: '40px 0' }} />
+                    ) : filteredSchedules.length === 0 ? (
+                      <Empty description={scheduleSearch ? `未找到匹配「${scheduleSearch}」的定时任务` : '暂无定时任务，点击「新建定时任务」创建'} style={{ padding: '40px 0' }} />
                     ) : (
                       <List
-                        dataSource={schedules}
+                        dataSource={filteredSchedules}
                         renderItem={sched => (
                           <List.Item
                             actions={[
