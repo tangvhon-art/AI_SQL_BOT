@@ -182,11 +182,9 @@ export default function ScenesPage() {
             ),
           }}
           columns={[
-            { title: '场景', dataIndex: 'scene_code', width: 180, render: (v: string, s) => (
-              <Space>
-                <Tag color={SCENE_META[v]?.color || 'default'}>{SCENE_META[v]?.name || v}</Tag>
-                <Typography.Text code>{v}</Typography.Text>
-              </Space>) },
+            { title: '场景', dataIndex: 'scene_code', width: 130, render: (v: string) => (
+              <Tag color={SCENE_META[v]?.color || 'default'}>{SCENE_META[v]?.name || v}</Tag>
+            ) },
             { title: '名称', dataIndex: 'scene_name' },
             { title: '说明', dataIndex: 'description', ellipsis: true },
             { title: '类型', width: 100, render: (_, s) => s.system ? <Tag>系统预置</Tag> : <Tag color="geekblue">自定义</Tag> },
