@@ -134,3 +134,118 @@ def delete_template(template_id: int, db: Session = Depends(get_db), user=Depend
     tpl.is_deleted = True
     db.commit()
     return {"ok": True}
+
+
+# ---------- 洞察定时任务 ----------
+class ScheduleIn(BaseModel):
+    name: str
+    template_id: int | None = None
+    config: dict = {}
+    cron_expr: str
+    model_id: int | None = None
+    prompt_template_id: int | None = None
+
+
+class ScheduleUpdate(BaseModel):
+    name: str | None = None
+    cron_expr: str | None = None
+    status: str | None = None  # active/paused
+
+
+@router.get("/schedules")
+def list_schedules(keyword: str = "", page: int = 1, page_size: int = 20,
+                   db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """列出洞察定时任务。"""
+    from ..models import InsightSchedule
+    q = db.query(InsightSchedule).filter(
+        InsightSchedule.workspace_id == user.workspace_id,
+        InsightSchedule.is_deleted.is_(False),
+    )
+    if keyword:
+        q = q.filter(InsightSchedule.name.contains(keyword))
+    total = q.count()
+    items = q.order_by(InsightSchedule.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return {"ok": True, "total": total, "items": [{
+        "id": s.id, "name": s.name, "cron_expr": s.cron_expr, "status": s.status,
+        "template_id": s.template_id, "last_run_at": s.last_run_at.isoformat() if s.last_run_at else None,
+        "last_report_id": s.last_report_id, "next_run_at": s.next_run_at.isoformat() if s.next_run_at else None,
+        "run_count": s.run_count, "created_at": s.created_at.isoformat() if s.created_at else None,
+    } for s in items]}
+
+
+@router.post("/schedules")
+def create_schedule(body: ScheduleIn, db: Session = Depends(get_db),
+                    user=Depends(get_current_user)):
+    """创建洞察定时任务。"""
+    from ..models import InsightSchedule
+    from ..engine.insight_scheduler import parse_cron
+    # 校验CRON表达式
+    next_run = parse_cron(body.cron_expr)
+    sched = InsightSchedule(
+        workspace_id=user.workspace_id,
+        name=body.name,
+        template_id=body.template_id,
+        config_snapshot=body.config,
+        cron_expr=body.cron_expr,
+        model_id=body.model_id,
+        prompt_template_id=body.prompt_template_id,
+        status="active",
+        next_run_at=next_run,
+        created_by=user.id,
+    )
+    db.add(sched)
+    db.commit()
+    db.refresh(sched)
+    return {"ok": True, "id": sched.id, "next_run_at": sched.next_run_at.isoformat()}
+
+
+@router.put("/schedules/{schedule_id}")
+def update_schedule(schedule_id: int, body: ScheduleUpdate,
+                    db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """更新定时任务（名称/CRON/状态）。"""
+    from ..models import InsightSchedule
+    from ..engine.insight_scheduler import parse_cron
+    sched = db.query(InsightSchedule).filter(
+        InsightSchedule.id == schedule_id, InsightSchedule.workspace_id == user.workspace_id
+    ).first()
+    if not sched:
+        raise HTTPException(404, "定时任务不存在")
+    if body.name:
+        sched.name = body.name
+    if body.cron_expr:
+        sched.cron_expr = body.cron_expr
+        sched.next_run_at = parse_cron(body.cron_expr)
+    if body.status:
+        sched.status = body.status
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/schedules/{schedule_id}")
+def delete_schedule(schedule_id: int, db: Session = Depends(get_db),
+                    user=Depends(get_current_user)):
+    """删除定时任务。"""
+    from ..models import InsightSchedule
+    sched = db.query(InsightSchedule).filter(
+        InsightSchedule.id == schedule_id, InsightSchedule.workspace_id == user.workspace_id
+    ).first()
+    if not sched:
+        raise HTTPException(404, "定时任务不存在")
+    sched.is_deleted = True
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/schedules/{schedule_id}/run")
+def run_schedule_now(schedule_id: int, db: Session = Depends(get_db),
+                     user=Depends(get_current_user)):
+    """手动立即执行一次定时任务。"""
+    from ..models import InsightSchedule
+    from ..engine.insight_scheduler import run_insight_schedule
+    sched = db.query(InsightSchedule).filter(
+        InsightSchedule.id == schedule_id, InsightSchedule.workspace_id == user.workspace_id
+    ).first()
+    if not sched:
+        raise HTTPException(404, "定时任务不存在")
+    result = run_insight_schedule(schedule_id)
+    return result

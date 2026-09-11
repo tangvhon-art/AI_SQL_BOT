@@ -1,7 +1,7 @@
 // 洞察分析：六步向导
 import { useEffect, useRef, useState } from 'react'
-import { Button, Card, Input, Select, Steps, Space, List, Tag, Switch, message, Modal, Empty, Spin, Collapse, Alert } from 'antd'
-import { ThunderboltOutlined, SaveOutlined, PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons'
+import { Button, Card, Input, Select, Steps, Space, List, Tag, Switch, message, Modal, Empty, Spin, Collapse, Alert, Tabs, Popconfirm } from 'antd'
+import { ThunderboltOutlined, SaveOutlined, PlayCircleOutlined, ReloadOutlined, ClockCircleOutlined, PlusOutlined, PauseOutlined, DeleteOutlined, EditOutlined, EyeOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import * as echarts from 'echarts'
 import { client } from '../api/client'
@@ -40,6 +40,14 @@ interface InsightTemplateItem {
   created_at: string
 }
 
+const CRON_PRESETS = [
+  { label: '每天 09:00', value: '0 9 * * *' },
+  { label: '每天 18:00', value: '0 18 * * *' },
+  { label: '每周一 09:00', value: '0 9 * * 1' },
+  { label: '每小时整点', value: '0 * * * *' },
+  { label: '自定义', value: 'custom' },
+]
+
 const CHART_OPTIONS = [
   { value: 'bar', label: '柱状图' }, { value: 'line', label: '折线图' },
   { value: 'pie', label: '饼图' }, { value: 'radar', label: '雷达图' },
@@ -68,6 +76,16 @@ export default function InsightPage() {
   const [templateLoading, setTemplateLoading] = useState(false)
   const [editingTemplate, setEditingTemplate] = useState<InsightTemplateItem | null>(null)
   const [templateSearch, setTemplateSearch] = useState('')
+  // 定时任务
+  const [activeTab, setActiveTab] = useState<'templates' | 'schedules'>('templates')
+  const [schedules, setSchedules] = useState<any[]>([])
+  const [scheduleLoading, setScheduleLoading] = useState(false)
+  const [scheduleModalOpen, setScheduleModalOpen] = useState(false)
+  const [scheduleName, setScheduleName] = useState('')
+  const [scheduleCron, setScheduleCron] = useState('0 9 * * *')
+  const [scheduleTemplateId, setScheduleTemplateId] = useState<number | null>(null)
+  const [scheduleSubmitting, setScheduleSubmitting] = useState(false)
+  const scheduleInputRef = useRef<any>(null)
 
   // 加载数据源
   const loadDatasources = async () => {
@@ -102,9 +120,93 @@ export default function InsightPage() {
     }
   }
 
+  const loadSchedules = async () => {
+    setScheduleLoading(true)
+    try {
+      const r = await client.get('/insight/schedules', { params: { page_size: 50 } })
+      setSchedules(r.data.items || [])
+    } catch {
+      setSchedules([])
+    } finally {
+      setScheduleLoading(false)
+    }
+  }
+
+  const openScheduleModal = (tpl?: any) => {
+    setScheduleTemplateId(tpl?.id || null)
+    setScheduleName(tpl ? `${tpl.name} 定时报告` : '')
+    setScheduleCron('0 9 * * *')
+    setScheduleModalOpen(true)
+  }
+
+  const handleCreateSchedule = async () => {
+    if (!scheduleName.trim() || !scheduleCron.trim()) return
+    if (!scheduleTemplateId) {
+      message.warning('请先选择一个洞察模板')
+      return
+    }
+    const tpl = templates.find(t => t.id === scheduleTemplateId)
+    if (!tpl) return
+    setScheduleSubmitting(true)
+    try {
+      await client.post('/insight/schedules', {
+        name: scheduleName.trim(),
+        template_id: scheduleTemplateId,
+        config: tpl.config || {},
+        cron_expr: scheduleCron.trim(),
+        model_id: modelId,
+      })
+      message.success('定时任务创建成功')
+      setScheduleModalOpen(false)
+      loadSchedules()
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '创建失败')
+    } finally {
+      setScheduleSubmitting(false)
+    }
+  }
+
+  const handleToggleSchedule = async (sched: any) => {
+    const newStatus = sched.status === 'active' ? 'paused' : 'active'
+    try {
+      await client.put(`/insight/schedules/${sched.id}`, { status: newStatus })
+      message.success(newStatus === 'active' ? '已启用' : '已暂停')
+      loadSchedules()
+    } catch {
+      message.error('操作失败')
+    }
+  }
+
+  const handleDeleteSchedule = async (sched: any) => {
+    try {
+      await client.delete(`/insight/schedules/${sched.id}`)
+      message.success('已删除')
+      loadSchedules()
+    } catch {
+      message.error('删除失败')
+    }
+  }
+
+  const handleRunScheduleNow = async (sched: any) => {
+    try {
+      message.loading({ content: '正在执行...', key: 'run-sched', duration: 0 })
+      const r = await client.post(`/insight/schedules/${sched.id}/run`)
+      message.destroy('run-sched')
+      if (r.data.ok) {
+        message.success(`执行成功，报告ID: ${r.data.report_id}`)
+      } else {
+        message.error(r.data.error || '执行失败')
+      }
+      loadSchedules()
+    } catch (e: any) {
+      message.destroy('run-sched')
+      message.error(e?.response?.data?.detail || '执行失败')
+    }
+  }
+
   // 进入列表视图时加载模板和数据源
   useEffect(() => {
-    if (viewMode === 'list') { loadTemplates(); loadDatasources() }
+    if (viewMode === 'list') { loadTemplates(); loadDatasources(); loadSchedules() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewMode])
 
@@ -165,10 +267,9 @@ export default function InsightPage() {
         config: { ...cfg, items: enabled },
         template_id: tpl.id,
       })
-      message.success('报告已生成')
       navigate(`/reports`)
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || '报告生成失败')
+      // 静默失败，不弹 toast
     } finally {
       setLoading(false)
     }
@@ -219,7 +320,6 @@ export default function InsightPage() {
       const r = await client.post('/insight/execute', {
         config: { purpose, datasource_id: datasourceId, items: enabled.map(i => ({ ...i })) },
       })
-      message.success('报告已生成')
       navigate(`/reports`)
     } finally {
       setLoading(false)
@@ -292,9 +392,18 @@ export default function InsightPage() {
     return (
       <div style={{ padding: 16, maxWidth: 1100, margin: '0 auto' }}>
         <Card
-          title={<Space><span style={{ fontSize: 16, fontWeight: 600 }}>洞察分析</span><Tag color="purple">模板列表</Tag></Space>}
+          title={<Space><span style={{ fontSize: 16, fontWeight: 600 }}>洞察分析</span></Space>}
           extra={<Button type="primary" icon={<ThunderboltOutlined />} onClick={startNewWizard}>新建洞察</Button>}
         >
+          <Tabs
+            activeKey={activeTab}
+            onChange={(k) => setActiveTab(k as any)}
+            items={[
+              {
+                key: 'templates',
+                label: <span><SaveOutlined style={{ marginRight: 6 }} />模板列表</span>,
+                children: (
+                  <>
           {templateLoading ? (
             <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div>
           ) : (
@@ -340,7 +449,119 @@ export default function InsightPage() {
               )}
             </>
           )}
+                  </>
+                )
+              },
+              {
+                key: 'schedules',
+                label: <span><ClockCircleOutlined style={{ marginRight: 6 }} />定时任务</span>,
+                children: (
+                  <div>
+                    <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ color: '#8c8c8c', fontSize: 13 }}>按 CRON 表达式定时执行洞察分析，结果自动保存至报告中心</span>
+                      <Button type="primary" icon={<PlusOutlined />} onClick={() => openScheduleModal()} disabled={templates.length === 0}>
+                        新建定时任务
+                      </Button>
+                    </div>
+                    {scheduleLoading ? (
+                      <div style={{ textAlign: 'center', padding: 40 }}><Spin /></div>
+                    ) : schedules.length === 0 ? (
+                      <Empty description="暂无定时任务，点击「新建定时任务」创建" style={{ padding: '40px 0' }} />
+                    ) : (
+                      <List
+                        dataSource={schedules}
+                        renderItem={sched => (
+                          <List.Item
+                            actions={[
+                              <Button key="run" size="small" icon={<ReloadOutlined />} onClick={() => handleRunScheduleNow(sched)}>立即执行</Button>,
+                              <Button key="toggle" size="small" icon={sched.status === 'active' ? <PauseOutlined /> : <PlayCircleOutlined />} onClick={() => handleToggleSchedule(sched)}>
+                                {sched.status === 'active' ? '暂停' : '启用'}
+                              </Button>,
+                              <Popconfirm key="del" title="确认删除该定时任务？" onConfirm={() => handleDeleteSchedule(sched)}>
+                                <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
+                              </Popconfirm>,
+                            ]}
+                          >
+                            <List.Item.Meta
+                              avatar={<ClockCircleOutlined style={{ fontSize: 20, color: sched.status === 'active' ? '#6C5CE7' : '#bfbfbf' }} />}
+                              title={<Space>{sched.name}<Tag color={sched.status === 'active' ? 'green' : 'default'}>{sched.status === 'active' ? '运行中' : '已暂停'}</Tag></Space>}
+                              description={
+                                <div style={{ fontSize: 12, color: '#8c8c8c' }}>
+                                  <div>CRON: <code style={{ background: '#f5f5f5', padding: '1px 6px', borderRadius: 4 }}>{sched.cron_expr}</code> · 下次执行: {sched.next_run_at ? new Date(sched.next_run_at).toLocaleString('zh-CN') : '—'}</div>
+                                  <div>已执行 {sched.run_count || 0} 次 · 上次: {sched.last_run_at ? new Date(sched.last_run_at).toLocaleString('zh-CN') : '—'} · 上次报告ID: {sched.last_report_id || '—'}</div>
+                                </div>
+                              }
+                            />
+                          </List.Item>
+                        )}
+                      />
+                    )}
+                  </div>
+                ),
+              },
+            ]}
+          />
         </Card>
+
+        {/* 新建定时任务弹窗 */}
+        <Modal
+          title="新建定时任务"
+          open={scheduleModalOpen}
+          onOk={handleCreateSchedule}
+          onCancel={() => setScheduleModalOpen(false)}
+          okText="创建"
+          cancelText="取消"
+          confirmLoading={scheduleSubmitting}
+          okButtonProps={{ disabled: !scheduleName.trim() || !scheduleTemplateId }}
+          width={480}
+        >
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ marginBottom: 6, fontWeight: 500 }}>任务名称</div>
+            <Input
+              value={scheduleName}
+              onChange={e => setScheduleName(e.target.value)}
+              placeholder="请输入任务名称"
+              maxLength={100}
+            />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ marginBottom: 6, fontWeight: 500 }}>选择洞察模板</div>
+            <Select
+              style={{ width: '100%' }}
+              value={scheduleTemplateId}
+              onChange={setScheduleTemplateId}
+              placeholder="选择要定时执行的洞察模板"
+              options={templates.map((t: any) => ({ value: t.id, label: t.name }))}
+            />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ marginBottom: 6, fontWeight: 500 }}>执行时间（CRON）</div>
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Select
+                style={{ width: '100%' }}
+                value={CRON_PRESETS.find(p => p.value === scheduleCron) ? scheduleCron : 'custom'}
+                onChange={(v) => {
+                  if (v === 'custom') {
+                    setScheduleCron('')
+                    setTimeout(() => scheduleInputRef.current?.focus(), 50)
+                  } else {
+                    setScheduleCron(v)
+                  }
+                }}
+                options={CRON_PRESETS}
+              />
+              <Input
+                ref={scheduleInputRef}
+                value={scheduleCron}
+                onChange={e => setScheduleCron(e.target.value)}
+                placeholder="分 时 日 月 周，例如：0 9 * * *"
+              />
+              <div style={{ fontSize: 12, color: '#8c8c8c' }}>
+                格式：分(0-59) 时(0-23) 日(1-31) 月(1-12) 周(0-6, 0=周日)，* 表示任意
+              </div>
+            </Space>
+          </div>
+        </Modal>
       </div>
     )
   }

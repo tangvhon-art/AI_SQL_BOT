@@ -250,10 +250,17 @@ def _llm_extract(question: str, sub_questions: list[str], llm: Any) -> list[dict
         prompt = (
             "你是数据分析查询要素提取助手。以下问题被拆解为多个子查询，"
             "请为每个子查询提取结构化要素。\n"
-            "【输出要求】严格返回 JSON 数组，每个元素对应一个子查询：\n"
+            "【输出协议（必须严格遵守）】\n"
+            "1. 严格返回一个 JSON 数组，元素个数与顺序必须和下方「子查询列表」一一对应，一个都不能少或合并；\n"
+            "2. 每个元素键名固定为 intent/metrics/dimensions/title/chart_hint，不得增删改名；\n"
+            "3. metrics/dimensions 必须是字符串数组，无法确定时输出空数组 []，禁止 null；\n"
+            "4. title 为必填非空中文字符串；chart_hint 只能取 "
+            "kpi/bar/line/group_bar/stack_bar/rank/pie/combo/radar 之一，用户未指定图表时输出空串；\n"
+            "5. 只输出 JSON 数组本身，禁止 Markdown 围栏、解释文字、推理过程。\n"
+            "元素结构示例：\n"
             '[{"intent": "value|compare|ranking|trend|detail|statistic", '
             '"metrics": ["指标名"], "dimensions": ["维度名"], '
-            '"title": "卡片标题", "chart_hint": "kpi|bar|line|group_bar|rank|pie|combo"}]\n'
+            '"title": "卡片标题", "chart_hint": ""}]\n'
             "【标题生成规则】\n"
             "1. title 是图表卡片的展示标题，必须由你生成，禁止留空，禁止直接复制子查询原文\n"
             "2. 标题应简洁概括该图表的核心内容（6-14字），包含关键时间范围（如近7日/本月）和核心指标\n"
@@ -270,8 +277,9 @@ def _llm_extract(question: str, sub_questions: list[str], llm: Any) -> list[dict
             "4. 只输出 JSON 数组，不要其他文字\n"
             "5. 同一原始问题拆出的多个子查询，时间口径必须一致：统一使用同一时间字段，禁止各子查询混用不同时间字段导致口径不一致\n"
             "6. chart_hint：若子查询文本中用户明确要求某种图表（如饼图/折线图/柱状图/排行榜/KPI/雷达图等），"
-            "chart_hint 必须取对应值（pie/line/bar/rank/kpi/radar），覆盖默认意图推断；"
-            "用户未明确要求时才按意图默认（ranking→rank、trend→line、statistic→bar 等）\n\n"
+            "chart_hint 必须取 kpi/bar/line/group_bar/stack_bar/rank/pie/combo/radar 中的对应值，覆盖默认意图推断；"
+            "用户未明确要求时输出空串，由系统按意图默认（ranking→rank、trend→line、statistic→bar 等）\n"
+            "7. 时间表达（近7天/本月/每日等）不写入 metrics/dimensions；同一指标不要同时出现在 metrics 与 dimensions 中\n\n"
             f"原始问题：{question}\n子查询列表：\n"
             + "\n".join(f"- {q}" for q in sub_questions)
         )

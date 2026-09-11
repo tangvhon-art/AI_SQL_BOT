@@ -19,6 +19,7 @@ from .ai_interpreter import AiInterpreter
 from .chart_recommender import ChartRecommender
 from .multi_query import ParallelExecutor
 from .prompt_service import PromptService
+from .llm_json import extract_json as _llm_extract_json
 
 logger = logging.getLogger(__name__)
 
@@ -370,37 +371,69 @@ class InsightGenerator:
         """LLM 生成分析项草案。"""
         if not self.llm or not self.llm.configured:
             return []
-        try:
-            prompt = (
+        valid_charts = {"bar", "line", "pie", "radar", "combo",
+                        "stack_bar", "group_bar", "rank", "kpi", "table"}
+
+        def _build_prompt(diag: str = "") -> str:
+            head = (
                 f"你是一位数据分析师。请根据以下分析目的，设计 3-6 个分析项。\n"
                 f"分析目的：{purpose}\n"
                 f"数据源ID：{datasource_id}\n\n"
-                f"每个分析项包含：id(如item1)、title(分析项标题)、question(自然语言查询问题)、"
-                f"chart_type(推荐图表类型：bar/line/pie/radar/combo/stack_bar/rank/kpi/table)。\n\n"
-                f"请严格按 JSON 格式返回：{{\"items\": [{{\"id\":\"\",\"title\":\"\",\"question\":\"\",\"chart_type\":\"\"}}]}}\n"
-                f"只返回 JSON，不要其他文字。"
+                "【输出协议】只输出一个 JSON 对象，键名固定为 items；禁止 Markdown 围栏与解释文字。\n"
+                "items 为数组，每个元素键名固定为 id/title/question/chart_type：\n"
+                "- id：item1、item2…；title：简洁中文标题；question：可独立执行的自然语言查询问题，必填非空；\n"
+                "- chart_type 只能取 bar/line/pie/radar/combo/stack_bar/group_bar/rank/kpi/table 之一；\n"
+                "- 至少返回 3 个分析项，覆盖总体/趋势/对比或排行等不同角度；\n"
+                '格式：{"items": [{"id":"item1","title":"","question":"","chart_type":"bar"}]}\n'
             )
-            resp = self.llm.chat(prompt, temperature=0.3)
-            text = resp if isinstance(resp, str) else getattr(resp, "content", str(resp))
-            m = re.search(r"\{[\s\S]*\}", text)
-            if not m:
+            if diag:
+                head += f"\n【输出修正】{diag}，请重新输出完整合法 JSON。\n"
+            return head
+
+        def _parse_items(text: str) -> list[InsightItem]:
+            data = _llm_extract_json(text)  # 统一容错（围栏/尾逗号/单引号修复）
+            if not isinstance(data, dict):
                 return []
-            data = json.loads(m.group(0))
             items_data = data.get("items", [])
             if not isinstance(items_data, list):
                 return []
             items = []
             for i, item in enumerate(items_data[:8]):
+                if not isinstance(item, dict):
+                    continue
+                question = str(item.get("question") or "").strip()
+                title = str(item.get("title") or "").strip()
+                if not question:  # question 是后续执行的必填项，缺失元素丢弃但保留其余（部分可用）
+                    continue
+                ct = str(item.get("chart_type") or "bar").strip()
+                if ct not in valid_charts:
+                    ct = "bar"
                 items.append(InsightItem(
-                    id=item.get("id", f"item{i+1}"),
-                    title=item.get("title", f"分析项{i+1}"),
-                    question=item.get("question", ""),
-                    chart_type=item.get("chart_type", "bar"),
+                    id=str(item.get("id") or f"item{i+1}"),
+                    title=title or f"分析项{i+1}",
+                    question=question,
+                    chart_type=ct,
                 ))
             return items
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("洞察草案 LLM 生成失败: %s", exc)
-            return []
+
+        text = ""
+        for attempt in range(2):  # 首轮 + 带诊断重试 1 次
+            try:
+                diag = ""
+                if attempt == 1:
+                    if not text:
+                        diag = "上一次返回为空"
+                    else:
+                        diag = "上一次输出不是约定的 items JSON（可能含围栏/尾逗号/缺字段）"
+                resp = self.llm.chat(_build_prompt(diag), temperature=0.3)
+                text = resp if isinstance(resp, str) else getattr(resp, "content", str(resp))
+                items = _parse_items(text)
+                if items:
+                    return items
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("洞察草案 LLM 第 %d 次生成失败: %s", attempt + 1, exc)
+        logger.warning("洞察草案 LLM 两次均失败/无有效分析项，回退默认模板")
+        return []
 
     @staticmethod
     def _default_items(purpose: str) -> list[InsightItem]:

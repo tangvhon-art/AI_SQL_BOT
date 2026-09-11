@@ -310,47 +310,6 @@ class QueryLog(Base, AuditMixin):
 
 
 # ---------- 结果复用与定时任务 ----------
-class SavedQuery(Base, AuditMixin):
-    __tablename__ = "saved_query"
-    __table_args__ = {"comment": "保存查询表"}
-    workspace_id = Column(BigInteger, nullable=False, comment="工作空间ID")
-    owner_id = Column(BigInteger, nullable=False, comment="创建人ID")
-    name = Column(String(128), nullable=False, comment="名称")
-    sql_text = Column(Text, nullable=False, comment="SQL文本")
-    params_json = Column(JSON, default=list, comment="参数定义JSON")
-    chart_config_json = Column(JSON, default=dict, comment="图表配置JSON")
-    tags = Column(String(255), default="", comment="标签")
-    remark = Column(String(512), default="", comment="备注")
-
-
-class ScheduledTask(Base, AuditMixin):
-    __tablename__ = "scheduled_task"
-    __table_args__ = {"comment": "定时任务表"}
-    saved_query_id = Column(BigInteger, nullable=False, comment="保存查询ID")
-    name = Column(String(128), nullable=False, comment="任务名称")
-    cron_expr = Column(String(64), nullable=False, comment="Cron表达式")
-    timezone = Column(String(64), default="Asia/Shanghai", comment="时区")
-    param_values_json = Column(JSON, default=dict, comment="参数值JSON")
-    status = Column(String(16), default="enabled", comment="状态 enabled/disabled")
-    last_run_at = Column(DateTime, nullable=True, comment="上次运行时间")
-    next_run_at = Column(DateTime, nullable=True, comment="下次运行时间")
-
-
-class TaskRunLog(Base, AuditMixin):
-    __tablename__ = "task_run_log"
-    __table_args__ = {"comment": "任务运行日志表"}
-    task_id = Column(BigInteger, nullable=False, comment="任务ID")
-    run_time = Column(DateTime, default=datetime.utcnow, comment="运行时间")
-    status = Column(String(16), default="running", comment="状态 running/success/failed")
-    param_values_json = Column(JSON, default=dict, comment="参数值JSON")
-    row_count = Column(Integer, default=0, comment="返回行数")
-    chart_snapshot_json = Column(JSON, default=dict, comment="图表快照JSON")
-    latency_ms = Column(Integer, default=0, comment="耗时毫秒")
-    error_msg = Column(String(512), default="", comment="错误信息")
-    retry_count = Column(Integer, default=0, comment="重试次数")
-
-
-# ---------- 字段级权限 ----------
 class PermissionRule(Base, AuditMixin):
     __tablename__ = "permission_rule"
     __table_args__ = {"comment": "字段权限规则表"}
@@ -592,4 +551,23 @@ class InsightReport(Base, AuditMixin):
     config_snapshot = Column(JSON, default=dict, comment="生成时的配置快照")
     params = Column(JSON, default=dict, comment="生成时的参数（时间范围等）")
     status = Column(String(20), default="generating", comment="状态：generating/success/failed")
+    created_by = Column(BigInteger, default=0, comment="创建人ID")
+
+
+class InsightSchedule(Base, AuditMixin):
+    """洞察分析定时任务：按CRON表达式定时执行洞察分析，结果保存至报告中心。"""
+    __tablename__ = "insight_schedule"
+    __table_args__ = {"comment": "洞察定时任务表"}
+    workspace_id = Column(BigInteger, nullable=False, comment="工作空间ID")
+    name = Column(String(200), nullable=False, comment="任务名称")
+    template_id = Column(BigInteger, nullable=True, comment="关联洞察模板ID")
+    config_snapshot = Column(JSON, default=dict, comment="执行时的配置快照")
+    cron_expr = Column(String(100), nullable=False, comment="CRON表达式（分 时 日 月 周）")
+    model_id = Column(BigInteger, nullable=True, comment="使用的模型ID")
+    prompt_template_id = Column(BigInteger, nullable=True, comment="AI解读Prompt模板ID")
+    status = Column(String(20), default="active", comment="状态：active/paused")
+    last_run_at = Column(DateTime, nullable=True, comment="上次执行时间")
+    last_report_id = Column(BigInteger, nullable=True, comment="上次生成的报告ID")
+    next_run_at = Column(DateTime, nullable=True, comment="下次执行时间")
+    run_count = Column(Integer, default=0, comment="累计执行次数")
     created_by = Column(BigInteger, default=0, comment="创建人ID")

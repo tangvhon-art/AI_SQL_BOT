@@ -3,92 +3,47 @@
 // 菜单为多级：AI 问数 / 数据管理（数据源、知识库）/ 系统管理（角色、用户组、用户、权限、模型、审计）/ 能力增强
 import { useEffect, useState } from 'react'
 import { Avatar, Breadcrumb, Dropdown, Layout, Menu, Space, Tag, Typography } from 'antd'
-import {
-  ApiOutlined, AppstoreOutlined, AuditOutlined, CommentOutlined, ControlOutlined, DatabaseOutlined,
-  DownOutlined, ExperimentOutlined, FileTextOutlined, LogoutOutlined,
-  RobotOutlined, SafetyCertificateOutlined, ScheduleOutlined, SettingOutlined,
-  TeamOutlined, ThunderboltOutlined, UsergroupAddOutlined, UserOutlined,
-} from '@ant-design/icons'
-import type { MenuProps } from 'antd'
+import { DownOutlined, LogoutOutlined, UserOutlined } from '@ant-design/icons'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { TOKEN_KEY, client } from './api/client'
 import type { UserInfo } from './types'
+import { CRUMB_MAP, parentOf } from './config/menu'
+import { convertMenuTree, extractAllowedPaths, hasPathPermission, type BackendMenuItem } from './utils/menu-permission'
 
 const { Sider, Header, Content } = Layout
-
-const MENU: MenuProps['items'] = [
-  { key: '/chat', icon: <CommentOutlined />, label: 'AI 问数' },
-  {
-    key: 'data', icon: <DatabaseOutlined />, label: '数据管理',
-    children: [
-      { key: '/datasources', icon: <ApiOutlined />, label: '数据源管理' },
-      { key: '/knowledge', icon: <FileTextOutlined />, label: '知识库（RAG）' },
-    ],
-  },
-  {
-    key: 'sys', icon: <SettingOutlined />, label: '系统管理',
-    children: [
-      { key: '/roles', icon: <TeamOutlined />, label: '角色管理' },
-      { key: '/groups', icon: <UsergroupAddOutlined />, label: '用户组管理' },
-      { key: '/users', icon: <UserOutlined />, label: '用户管理' },
-      { key: '/permissions', icon: <SafetyCertificateOutlined />, label: '权限控制' },
-      { key: '/models', icon: <RobotOutlined />, label: '模型配置' },
-      { key: '/prompts', icon: <FileTextOutlined />, label: 'Prompt管理' },
-      { key: '/audit', icon: <AuditOutlined />, label: '审计日志' },
-    ],
-  },
-  {
-    key: 'cap', icon: <ExperimentOutlined />, label: '能力增强',
-    children: [
-      { key: '/eval', icon: <ExperimentOutlined />, label: '评测中心' },
-      { key: '/scenes', icon: <AppstoreOutlined />, label: '场景模板' },
-      { key: '/cache', icon: <ThunderboltOutlined />, label: '缓存管理' },
-      { key: '/sys-config', icon: <ControlOutlined />, label: '系统配置' },
-      { key: '/reports', icon: <FileTextOutlined />, label: '报告中心' },
-      { key: '/insight', icon: <ThunderboltOutlined />, label: '洞察分析' },
-    ],
-  },
-  { key: '/saved', icon: <ScheduleOutlined />, label: '定时任务' },
-]
-
-const CRUMB_MAP: Record<string, { title: string; extra?: string }> = {
-  '/chat': { title: 'AI 问数', extra: '自然语言查询数据库，结果含文字说明与图表' },
-  '/datasources': { title: '数据源管理', extra: '连接配置、Schema 采集（含注释与外键关系）' },
-  '/datasources/:id/schema': { title: 'Schema 详情', extra: '表/字段注释、表关联与 ER 关系图' },
-  '/knowledge': { title: '知识库（RAG）', extra: 'FAQ / 文档切片向量化 / 检索测试' },
-  '/roles': { title: '角色管理', extra: '角色 CRUD，可分配用户、用户组与菜单（权限取并集）' },
-  '/groups': { title: '用户组管理', extra: '用户组 CRUD 与成员管理，组内角色随组生效' },
-  '/users': { title: '用户管理', extra: '用户 CRUD，可分配角色与用户组（取并集）' },
-  '/permissions': { title: '权限控制', extra: '角色/用户/用户组可查并集与不可查并集（黑名单优先），支持行级权限规则配置' },
-  '/models': { title: '模型配置', extra: 'OpenAI 兼容 LLM 与 Embedding' },
-  '/audit': { title: '审计日志', extra: '问数全链路留痕（含权限注入类型）' },
-  '/eval': { title: '评测中心', extra: '评测用例管理、批次执行与指标报告（C4 评测闭环）' },
-  '/scenes': { title: '场景模板', extra: '六大场景模板包管理与场景识别测试（C14）' },
-  '/cache': { title: '缓存管理', extra: 'SQL 生成缓存 / 结果缓存统计与清理（C1）' },
-  '/sys-config': { title: '系统配置', extra: '成本门槛 / 限流超时 / 样例值采集等能力参数（DB 覆盖即时生效）' },
-  '/saved': { title: '定时任务', extra: '保存查询参数化、cron 定时生成数据与图表' },
-}
 
 export default function App() {
   const nav = useNavigate()
   const loc = useLocation()
   const [collapsed, setCollapsed] = useState(false)
   const [me, setMe] = useState<UserInfo | null>(null)
+  const [menuItems, setMenuItems] = useState<any[]>([])
+  const [allowedPaths, setAllowedPaths] = useState<string[]>([])
+  const [menuLoading, setMenuLoading] = useState(true)
   const seg = '/' + (loc.pathname.split('/')[1] ?? 'chat')
   const selected = loc.pathname.startsWith('/datasources/') ? '/datasources/:id/schema' : seg
   const crumb = CRUMB_MAP[selected] ?? CRUMB_MAP['/chat']
-  // 当前路由所属的分组：子页面加载时自动展开对应父级菜单
-  const parentOf = (s: string): string | undefined => {
-    if (['/datasources', '/datasources/:id/schema', '/knowledge'].includes(s)) return 'data'
-    if (['/roles', '/groups', '/users', '/permissions', '/models', '/prompts', '/audit'].includes(s)) return 'sys'
-    if (['/eval', '/scenes', '/cache', '/sys-config', '/reports', '/insight'].includes(s)) return 'cap'
-    return undefined
-  }
-  const defaultOpen = parentOf(selected)
+  const defaultOpen = parentOf(selected) ? [parentOf(selected)!] : []
 
   useEffect(() => {
     client.get<{ user: UserInfo }>('/auth/me').then((r) => setMe(r.data.user)).catch(() => {})
+    // 获取当前用户有权限的菜单树
+    client.get<BackendMenuItem[]>('/menus/tree').then((r) => {
+      const tree = r.data
+      setMenuItems(convertMenuTree(tree) || [])
+      setAllowedPaths(extractAllowedPaths(tree))
+    }).catch(() => {
+      // 接口失败时回退到全量菜单（开发环境兜底）
+      import('./config/menu').then((m) => setMenuItems(m.MENU as any[]))
+    }).finally(() => setMenuLoading(false))
   }, [])
+
+  // 路由守卫：无权限路径重定向到 /chat
+  useEffect(() => {
+    if (!menuLoading && allowedPaths.length > 0 && !hasPathPermission(loc.pathname, allowedPaths)) {
+      nav('/chat', { replace: true })
+    }
+  }, [loc.pathname, menuLoading, allowedPaths, nav])
 
   const logout = () => {
     localStorage.removeItem(TOKEN_KEY)
@@ -131,8 +86,8 @@ export default function App() {
           theme="light"
           mode="inline"
           selectedKeys={[selected]}
-          items={MENU}
-          defaultOpenKeys={defaultOpen ? [defaultOpen] : []}
+          items={menuItems}
+          defaultOpenKeys={defaultOpen}
           onClick={(e) => nav(e.key)}
           style={{ borderInlineEnd: 'none', marginTop: 8, background: 'transparent' }}
         />

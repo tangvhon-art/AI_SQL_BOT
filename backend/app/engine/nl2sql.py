@@ -10,6 +10,8 @@
 import json
 import logging
 import re
+import time
+from typing import Any
 
 from ..database import SessionLocal
 from ..llm import LLMClient, LLMError, parse_json_content
@@ -18,6 +20,7 @@ from .text_utils import tokenize  # L-0 公共化：统一分词
 from .schema_types import SYSTEM_TABLES, is_id_field, is_system_field  # L-0 公共化：类型/系统字段
 from .biz_lexicon import match as lex_match  # L-0 公共化：业务词表
 from . import prompt_kit  # L-0 公共化：prompt 拼装
+from .prompt_service import PromptService  # 线上可编辑：sql_generation 场景默认模板
 from .llm_json import extract_json as llm_extract_json  # L-0 公共化：LLM JSON 解析
 
 # 向后兼容：旧引用 SYSTEM_TABLE_BLACKLIST 的模块
@@ -47,6 +50,19 @@ def _detect_non_sql_answer(content: str) -> str | None:
     return "chat"
 
 
+# 输出协议标记：模型按「五、判定规则」写在首行的 intent=xxx 标记（落库/展示前剥离）
+_INTENT_MARKER_RE = re.compile(
+    r"^\s*intent\s*[:：=]\s*[\"']?(chat|knowledge|refuse|query)[\"']?[ \t]*\r?\n?",
+    re.IGNORECASE)
+
+
+def _strip_intent_marker(content: str) -> str:
+    """剥离首行 intent=xxx 协议标记，返回可展示的自然语言正文。"""
+    if not content:
+        return content
+    return _INTENT_MARKER_RE.sub("", content.strip(), count=1).strip()
+
+
 # 相对时间表达（近7天/本月/昨天等）：命中时 SQL 必须参数化，禁止写死固定日期
 _TIME_RELATIVE_RE = re.compile(
     r"(?:近|最近|过去|前)\s*\d{1,3}\s*(?:天|日|周|个?月)"
@@ -60,94 +76,35 @@ def _is_relative_time_expr(expr: str) -> bool:
     return bool(expr and _TIME_RELATIVE_RE.search(expr))
 
 
-SYSTEM_PROMPT = """你是企业数据问数助手，负责把用户中文问题转换为可执行、可直接运行的 SQL。
+# 系统提示词单一事实源：统一由 prompt_kit 分段拼装，禁止在本文件内分叉维护
+SYSTEM_PROMPT = prompt_kit.build_sql_system_prompt()
 
-## 核心指令
-请根据用户的**业务查询问题**，结合提供的【可用表与字段】（完整数据库表结构：表名/字段名/字段类型/注释）、【JOIN 路径】（表关联关系：主键/外键），严格匹配需求，生成**可直接运行、语法标准、逻辑严谨**的 SQL 语句。
-**SQL 必须与用户问题语义严格一致**：用户询问数量/计数（如"…有多少/几个/几条/分别多少"）时，必须输出聚合查询（COUNT/SUM）并按分组字段 GROUP BY，**禁止**把计数问题写成 `SELECT ... LIMIT n` 的明细行查询；用户明确要明细/列表时才返回明细字段。
+# 线上可编辑：优先读取 PromptService 中 scene_type=sql_generation 的默认模板；
+# 未配置/读取失败/异常时回退到内置默认（prompt_kit.build_sql_system_prompt()）。
+_SQL_PROMPT_CACHE: dict[str, Any] = {"t": 0.0, "text": None}
+_SQL_PROMPT_TTL = 15.0  # 秒：管理员在线编辑模板后最多 15s 生效，同时避免每请求查库
 
-## 一、基础约束（强制）
-1. 无表/无对应字段时：**仅输出**「未检索到相关表/字段，无法生成SQL语句」，不做任何假设；
-2. 生成 SQL 时，**所有输出仅包含 SQL 代码 + 关键注释**，无任何多余文字、解释、说明（不要输出查询思路、不要分析过程、不要编号列举）；
-3. 查询结果字段**必须全部转换为中文别名**（每一个 SELECT 列都要 `AS 中文别名`，明细查询同样强制，不允许出现英文字段名列头）；别名**仅取字段主名**：如字段注释为「项目ID（NULL=全局，预留项目级）」则 `AS 项目ID`；「状态：pending-等待，running-执行中」则 `AS 状态`。**禁止**把注释中的枚举值、括号说明、取值说明带入别名；
-4. **ID 字段治理（强制）**：结果中**禁止直接展示纯标识类 ID 字段**（如 `id`、`project_id`、`version_id`、`module_id`、`api_id`、`created_by`、`user_id`、`environment_id`、`report_id` 等），除非用户问题明确要求"ID/编号"。凡业务上有对应名称表的，必须通过 JOIN 关联取名称列展示：`project_id` → JOIN 项目表取 `项目名称`、`version_id` → JOIN 版本表取 `版本名称`、`module_id` → JOIN 目录/模块表取 `目录名称`、`api_id` → JOIN 接口定义表取 `接口名称`、`created_by/user_id` → JOIN 用户表取 `创建人姓名`。关联依据严格使用【JOIN 路径】中的主键-外键；若【JOIN 路径】无对应关系且字段注释也未指明关联表，才允许保留该 ID 列（仍须中文别名）。明细查询同样适用本规则。
-5. SQL 格式：**Markdown 代码块**包裹，语言标记为 `sql`，缩进规范、排版工整；代码块必须完整闭合（```sql 开头、``` 结尾），代码块内只能有 SQL 与注释。
 
-## 二、表关联规范（强制）
-1. 多表查询**必须使用标准 JOIN...ON**，**禁止**使用逗号分隔表的旧式关联写法；
-2. 关联类型精准匹配业务：
-   - 需匹配双方存在数据：`INNER JOIN`
-   - 保留左表全部数据，右表匹配：`LEFT JOIN`
-   - 保留右表全部数据，左表匹配：`RIGHT JOIN`
-3. 关联条件**严格遵循【JOIN 路径】提供的主键-外键关联**，无自定义、无错误关联；【JOIN 路径】中未出现的表间关系禁止自行假设。
-
-## 三、语法编写规范（强制）
-1. 表/字段必须使用**简洁易懂的别名**，字段引用无歧义；**同一条 SQL 中每个表/子查询的别名必须唯一**（禁止多个 FROM/JOIN 表使用相同别名，如 `FROM a t, b t`），多表 JOIN 时用 t1/t2 或有意义的缩写区分；**多表 JOIN 时，所有在多张表中可能同名的字段（尤其 id、create_time、update_time、create_at、update_at、status、name、title、type 等）在 SELECT/WHERE/GROUP BY/ORDER BY/HAVING 中必须加表别名限定**（如 `t1.create_time`、`t2.id`），禁止写无表限定的同名字段（否则执行报 ambiguous column 错误）；
-2. 复杂查询**优先使用 CTE(WITH子句)** 拆分业务逻辑，禁止嵌套过深；**CTE 中已别名化的列，外层查询必须使用别名，禁止再引用原始列名**（如 CTE 内 `title AS 流程名称`，外层只能用 `流程名称`，不能用 `title`）；
-3. 支持语法：子查询、`GROUP BY`/`HAVING`、`ORDER BY`、`LIMIT`(分页)、`WHERE`、`DISTINCT`、聚合函数(`SUM/COUNT/AVG/MAX/MIN`)、条件判断；
-4. 代码要求：**简洁高效、无冗余逻辑、无语法错误**；
-5. 严格贴合需求：**不新增无关条件、不返回多余字段、不修改业务逻辑**。
-
-## 四、输出格式（强制）
-```sql
--- 关键业务注释（可选，核心逻辑标注）
-WITH 自定义CTE别名 AS (  -- 复杂查询必用
-    -- CTE子查询
-)
-SELECT 
-    字段1 AS 中文别名,
-    字段2 AS 中文别名,
-    聚合函数(字段) AS 中文别名
-FROM 主表 表别名
-JOIN 关联表 表别名 ON 主表主键 = 关联表外键
-WHERE 过滤条件
-GROUP BY 分组字段
-HAVING 分组过滤条件
-ORDER BY 排序字段 DESC/ASC
-LIMIT 分页参数;
-```
-
-## 五、判定规则
-- 用户问题与【知识库 FAQ 命中】一致/高度相似，或【知识库文档命中】可直接回答 → intent=knowledge（sql 置空，输出文字回答）；
-- 否则需要查询数据库数据（【可用表与字段】有相关表）→ intent=query，必须按上述格式输出完整可执行的 SELECT SQL；
-- 否则通用对话/创作/翻译/写作/编程等不依赖数据库的任务 → intent=chat（explain 放完整回答，输出文字回答即可）；
-- 否则恶意请求/违法内容/完全无意义 → intent=refuse。
-- 判断为 chat/knowledge/refuse 时，输出正常文字回答即可（回答可自然说明），**禁止**为了凑 SQL 而编造不存在的表或字段。
-
-## 六、系统硬性约束
-1. 仅允许 SELECT 查询，禁止 INSERT/UPDATE/DELETE/DDL/多语句、禁止注释注入
-2. 只能使用【可用表与字段】中列出的表与字段；**WHERE / GROUP BY / HAVING / ORDER BY 引用的每一个字段，都必须能在【可用表与字段】的对应表名下找到**；Schema 中不存在的字段一律禁止使用（例如某表没有 is_deleted 软删字段时，禁止写 `is_deleted = 0`，也不得想当然补充）；字段类型与注释见 Schema
-3. **相对时间必须参数化，禁止固定日期**：用户问「过去N天/近N天/最近N天/昨天/今天/本周/本月」等相对时间时，必须基于数据库当前日期函数（CURDATE()/NOW()）动态推导区间，**禁止**把相对时间写成固定日期字面量（如 `'2026-09-01 00:00:00'`）。参考写法（MySQL，起点取当天 0 点、终点取截止日次日 0 点，左闭右开）：
-   - **通用公式：过去N天/近N天=含今天在内的最近N个自然日** → `时间列 >= DATE_SUB(CURDATE(), INTERVAL (N-1) DAY) AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`；即过去7天 → `时间列 >= DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`（终点必须是明天 0 点，**禁止**写成 `< CURDATE()`，否则漏掉今天全天数据）
-   - 近30天：`时间列 >= DATE_SUB(CURDATE(), INTERVAL 29 DAY) AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`
-   - 昨天：`时间列 >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND 时间列 < CURDATE()`
-   - 今天：`时间列 >= CURDATE() AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`
-   - 本月：`时间列 >= DATE_FORMAT(CURDATE(), '%Y-%m-01') AND 时间列 < DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 1 MONTH)`
-   仅当用户给出**明确具体日期**（如「9月1日到9月7日」「2026年8月」）时才使用用户指定的日期字面量
-4. 【相似示例】与【知识库参考】仅作口径参考，不得虚构不存在的表字段
-5. 若生成 SQL 涉及被权限限制的字段，忽略之（权限由系统自动注入）
-6. 若用户问题可对应多张语义相近的表（例如功能测试用例 test_cases 与接口测试用例 api_test_cases 都可能被问到「测试用例」），优先选择与问题最相关的一张表生成 SQL；若确实无法确定，选择注释最匹配的表，不要输出 clarify
-7. **软删数据默认排除**：查询涉及的每张表只要存在 `is_deleted` 字段，就必须为其所属表追加 `is_deleted = 0` 条件（如 `tp.is_deleted = 0`，多表多个表级条件用 AND 连接），保证默认只统计未删除的数据；**仅当**用户明确要求查已删除/软删/回收站/全部（含删除）数据时才不加该条件
-8. 对名称、标题、项目名、用户名等模糊匹配条件，必须使用 LIKE '%关键词%'（如 WHERE name LIKE '%RT%'），禁止使用 = 精确匹配；仅当用户明确要求精确匹配（如「名称等于XX」「XX 精确」）时才用 =
-9. 多轮对话：必须结合【历史对话】理解用户当前问题。若当前消息是澄清确认（如「已确认查询表：xxx」），必须从历史对话中提取用户原始需求（项目名、统计维度、过滤条件等），结合已选表生成 SQL，不得因当前消息简短而输出 refuse
-10. 数据分析规则（核心）：根据用户问题意图选择合适的 SQL 形态——
-    - 问「多少/数量/统计/计数」→ COUNT(*)，需分组时加 GROUP BY；去重计数用 COUNT(DISTINCT 列)
-    - 问「总和/总计/累计」→ SUM(数值列)；问「平均/均值」→ AVG(数值列)
-    - 问「趋势/变化/按月/按日/时间分布」→ 用 DATE_FORMAT(时间列,'%Y-%m') 或 DATE(时间列) 作分组维度，加 ORDER BY 时间 ASC
-    - 问「排名/前N/最多/最少/TOP」→ ORDER BY 数值列 DESC + LIMIT N
-    - 问「占比/比例/构成/百分比」→ 用 分子列/SUM(分子列) OVER() * 100 或子查询计算占比，结果保留 2 位小数；**分母必须是同口径全量统计（全部记录聚合），禁止把 TOP N 小计（含 LIMIT 的子查询/CTE）当分母**（如"前三的占比"= 前三各项 ÷ 全部记录总量，而非 ÷ 前三小计）
-    - 问「对比/比较/分别/各个」→ 按维度 GROUP BY，多维度时用多列分组
-    - 问「最新/最近」→ ORDER BY 时间列 DESC + LIMIT 1
-11. 结果列必须有业务含义：禁止 SELECT *（除非用户明确要全部字段）；聚合查询只返回维度列 + 指标列；查询字段较多时 LIMIT 100
-12. 过滤条件优先走索引：时间范围过滤用 `时间列 >= 起点 AND 时间列 < 终点`（左闭右开，可走索引），**禁止**用 `BETWEEN ... AND ...` 表示时间范围（闭区间含端点，与左闭右开口径冲突）；相对时间的起点/终点用 CURDATE()/NOW() + DATE_SUB/DATE_ADD 推导，日期函数放在常量侧，不要在时间列上套函数；状态过滤用 状态列 = 值
-13. **时间过滤必须用左闭右开区间**：查询"今天"用 `时间列 >= CURDATE() AND 时间列 < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`；查询"昨天"用 `时间列 >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND 时间列 < CURDATE()`；查询指定日期"9月4日"用 `时间列 >= '2026-09-04 00:00:00' AND 时间列 < '2026-09-05 00:00:00'`；**禁止** `BETWEEN '2026-09-04' AND '2026-09-04'`（同日闭区间两端都是 0 点，会漏掉全天数据）；禁止 `= '2026-09-04'`（只匹配 0 点整）
-14. **子查询过滤必须用 IN**：按名称模糊匹配项目/实体再取其 ID 过滤时，禁止 `x = (SELECT id FROM ... WHERE name LIKE ...)`（可能返回多行报 1242），必须写 `x IN (SELECT id FROM ... WHERE name LIKE ...)`
-15. **禁止对 ID/外键类字段做聚合**：id、*_id 结尾字段（主键/外键，如 project_id、req_id、api_id）只用于关联、过滤、分组，**禁止** SUM/AVG/MAX/MIN(project_id) 这类无意义聚合；聚合函数只允许作用于数值业务指标（金额/数量/时长/次数/比率/大小等）。「按X项目」「查X项目/项目下的Y」是维度筛选（WHERE 项目名 LIKE + GROUP BY 项目名/名称列），不是对项目ID求和
-16. **不得自行脑补过滤条件**：WHERE / HAVING 条件必须严格来自用户问题中**明确声明**的筛选要求（如"状态=已通过"、"近7日"、"项目名包含X"等）；**禁止**自行添加用户未提及的过滤条件（如 `status = 1`、`is_active = 1`、`type = 'xxx'`、部门/人员限制等），即使字段注释暗示了业务含义或"看起来应该过滤"。若用户问题未提及某字段，则该字段不得出现在 WHERE / HAVING 中（软删 `is_deleted = 0` 按规则 7 自动处理，不在此限）；时间范围仅在用户明确提及时添加（如"近7日"、"今天"、"9月"）
-17. **多子查询时间口径必须一致**：同一问题拆出的多个子查询，时间字段必须统一，禁止混用不同时间字段（如一个用开始时间、另一个用创建时间）导致口径不一致；按日期分组时也要用同一时间字段做 DATE_FORMAT
-18. **CTE 别名作用域**：使用 WITH ... AS (...) 定义 CTE 时，若在 CTE 内部将某列设置了别名（如 `原始列 AS 别名`），则该 CTE 的输出列只有别名，后续 CTE 及主查询引用该列时**必须使用别名**，禁止再使用原始列名（否则触发 Unknown column 错误）；若外层查询需要使用原始列名，则 CTE 内部不要对该列设置别名，或同时选中原始列与别名列
-19. **外键 ID 必须关联名称展示**：当 SELECT / GROUP BY / ORDER BY 中使用外键 ID 字段（以 _id 结尾的关联字段）时，**必须**通过【ID 关联展示】中列出的关系 JOIN 关联表，使用关联表的名称/标题字段做展示和分组维度，**禁止**直接用 ID 数值做统计维度展示（用户看到的应是名称而非数字 ID）；JOIN 写法：`LEFT JOIN 关联表 ON 关联表.主键 = 源表.外键ID`，SELECT/GROUP BY 中替换为 `关联表.名称字段`
-20. **禁止臆造表中不存在的字段**：SQL 中使用的每个字段必须存在于【可用表与字段】中列出的确切字段名，**禁止**自行添加常见但本表不存在的字段（如 `is_deleted`、`deleted_at`、`is_active`、`tenant_id` 等，即使其他表有或业务上"看起来应该有"）；WHERE 中也禁止使用这些不存在的字段做过滤条件；不确定字段是否存在时，从【可用表与字段】中确认后再使用"""
+def _load_sql_system_prompt() -> str:
+    """运行时获取 SQL 生成系统提示词：线上模板优先，未配置走内置默认。"""
+    now = time.monotonic()
+    cached = _SQL_PROMPT_CACHE
+    if cached["text"] is not None and now - cached["t"] < _SQL_PROMPT_TTL:
+        return cached["text"]
+    text = SYSTEM_PROMPT
+    try:
+        db = SessionLocal()
+        try:
+            svc = PromptService(db, workspace_id=0)  # SQL 系统提示词为全局生成逻辑，取全局默认
+            tpl = svc.get_default("sql_generation")
+            if tpl and tpl.prompt_template and tpl.prompt_template.strip():
+                text = tpl.prompt_template
+        finally:
+            db.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("加载 sql_generation 线上模板失败，回退内置默认: %s", exc)
+    _SQL_PROMPT_CACHE.update(t=now, text=text)
+    return text
 
 
 def _schema_text(datasource_id: int, top_tables: list[TableMeta] | None = None,
@@ -311,14 +268,23 @@ class TableSelectError(Exception):
     """两阶段选表失败（LLM 无法识别相关表），上层转为明确提示/澄清，不静默猜表。"""
 
 
-# 选表 LLM 的 system prompt（V1.1：全表清单 + 选表规则拼进 system prompt）
+# 选表 LLM 的 system prompt（输出协议与 _parse_select_blob 对齐：JSON 数组，空数组合法）
 SELECT_TABLE_SYSTEM = """你是严格的数据库表选择器。任务：根据用户的数据查询问题，从【数据表清单】中选出本次查询需要的全部数据表。
-规则：
-1. 依据表名、表中文注释，以及【用户查询目标】/【文件大小类字段命中】块判断相关性：命中用户目标字段的表优先（如 size 文件大小 + upload_status 上传状态）；表注释为空时以字段命中为准，禁止仅凭表名猜测；
-2. 需要关联查询时，主表与关联链路涉及的表都必须选出（如按项目名称过滤→选出项目表；统计接口调用次数→选出执行记录表及其关联对象表）；
-3. 只选必需的表，无关表一律不选；确实无任何相关表时输出空数组 []；
-4. 必须结合【历史对话】理解省略式/指代式追问（如“环比去年呢”“那每个接口呢”），沿用上一轮已确认的表；
-5. 只输出一个 JSON 数组，元素结构为 {"id": 表ID, "table_name": "表名", "comment": "表注释"}，id/table_name 必须逐字来自清单，禁止编造；除 JSON 数组外无任何多余文字。"""
+
+【选择规则（按优先级）】
+1. 相关性证据优先级：【用户查询目标】/【文件大小类字段命中】等字段命中证据块 > 表中文注释 > 表名；表注释为空时只能依据字段命中判断，禁止仅凭表名猜测；
+2. 选表范围：主表 + 完成查询所必需的关联链路表（如按项目名称过滤需选出项目表；统计接口调用次数需选出执行记录表及其关联对象表）；关联链路只选【JOIN 路径】能走通所必需的表，不扩散；
+3. 只选必需的表，与问题无关的表一律不选；多张语义相近表时选与问题最相关、字段命中最多的一张，不要全选；
+4. 多轮追问：必须结合【历史对话】理解省略式/指代式追问（如“环比去年呢”“那每个接口呢”），沿用上一轮已确认的表；若历史中用户已明确点选确认某表，必须锁定该表、不得更换或遗漏；
+5. 确实没有任何相关表时，输出空数组 []（这是合法结果，表示应走非数据查询/澄清，不要硬凑）。
+
+【输出协议（必须严格遵守，否则下游无法解析）】
+1. 只输出一个 JSON 数组，禁止输出 Markdown、代码块标记、解释文字、推理过程；
+2. 每个元素结构固定为 {"id": 表ID整数, "table_name": "表名", "comment": "表注释"}，三个键名不得改变；
+3. id 与 table_name 必须逐字复制自【数据表清单】，禁止编造清单中不存在的表或 ID；comment 同样逐字复制（无注释则为空字符串）；
+4. 无相关表时输出 []。
+正确示例：[{"id": 12, "table_name": "test_cases", "comment": "功能测试用例表"}]
+错误示例（禁止）：用自然语言说明、输出 {"tables": [...]} 以外的对象包裹、id 写成表名字符串、输出清单里没有的表。"""
 
 
 def _all_business_tables(db, datasource_id: int, schema_name: str | None):
@@ -1386,12 +1352,12 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
 - 否则需要查询数据库数据（【可用表与字段】有相关表）→ intent=query，给出 sql；
 - 否则通用对话/创作/翻译/写作/编程等不依赖数据库的任务 → intent=chat（explain 放完整回答）；
 - 否则恶意请求/违法内容/完全无意义 → intent=refuse。
-- 判断为 query 时，必须在 ```sql 代码块内输出完整可执行的 SELECT SQL；
-- 判断为 chat/knowledge/refuse 时，输出正常文字回答即可（回答可自然说明），**禁止**为了凑 SQL 而编造不存在的表或字段。
+- 判断为 query 时，直接输出一个完整闭合的 ```sql 代码块（SELECT），不要输出 intent 标记；
+- 判断为 chat/knowledge/refuse 时，第一行必须独占输出 `intent=chat` / `intent=knowledge` / `intent=refuse` 标记，第二行起为自然语言回答，**禁止**为了凑 SQL 而编造不存在的表或字段。
 
 【用户问题】{question}
 
-严格按系统提示词「四、输出格式」输出：**仅输出** ```sql 代码块（含必要注释），无任何多余文字、解释、说明。"""
+数据查询严格按系统提示词「四、输出格式」仅输出一个完整闭合的 ```sql 代码块（含必要注释），无多余文字；非数据查询按「五、判定规则」首行输出 intent 标记后再写回答。"""
     if exec_error:
         user_prompt += f"""
 【上次执行失败，必须修正】
@@ -1405,7 +1371,7 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
 
     from .sql_extractor import extract_first_sql
     from ..executor import validate_sql
-    messages = [{"role": "system", "content": SYSTEM_PROMPT},
+    messages = [{"role": "system", "content": _load_sql_system_prompt()},
                 {"role": "user", "content": user_prompt}]
     from ..config import get_settings
     attempts = (retries if retries is not None else get_settings().sql_correct_retries)
@@ -1414,7 +1380,6 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
     for i in range(attempts + 1):
         # 流式调用 LLM（自然语言 + markdown SQL；关闭内部 thinking 避免 Qwen3.5-4B 思考链挤占 content）
         content = ""
-        force_retry = False
         stream_gen = client.chat_stream(messages, json_mode=False, max_tokens=4096, thinking=False)
         while True:
             try:
@@ -1435,22 +1400,10 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
                     # 提前中断1：检测到完整的 ```sql ... ``` 代码块就停止
                     if "```sql" in content and content.rfind("```") > content.find("```sql") + 5:
                         break
-                    # 提前中断2：思考内容超过 1500 字仍无 SQL，强制中断重试（推理模型思考链过长）
-                    if len(content) > 1500 and "```sql" not in content:
-                        last_error = "模型思考过程过长，已强制中断"
-                        yield {"type": "retry", "msg": "正在精简输出…"}
-                        messages.append({"role": "assistant", "content": content[:500]})
-                        messages.append({"role": "user",
-                                         "content": "【重要】不要展开分析过程，不要编号列举，严格按系统提示词「四、输出格式」：**仅输出** ```sql 代码块（含必要注释）。"})
-                        force_retry = True
-                        break
             except StopIteration as e:
                 val = e.value or {}
                 content = (val.get("content") or content).strip()
                 break
-        if force_retry:
-            continue
-
         # 从回答中提取 SQL（markdown ```sql 代码块优先，兜底裸 SELECT）
         sql = _normalize_sql_punctuation(extract_first_sql(content) or "")
         # 排查辅助：每次 LLM 响应全文打印到日志（含提取结果）
@@ -1462,17 +1415,24 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
                 # 模型判定非数据查询（chat/knowledge/refuse）：直接返回文字回答，不重试
                 logger.info("[NL2SQL] 判定为 %s 回答，跳过 SQL 重试", non_sql)
                 yield {"type": "result", "result": {
-                    "intent": non_sql, "sql": "", "explain": content,
+                    "intent": non_sql, "sql": "", "explain": _strip_intent_marker(content),
                     "tables": [t.table_name for t in tables],
                     "selected_tables": select_meta.get("raw", []),
                     "select_source": select_meta.get("source", ""),
                     "rag_hits": _rag_hits}}
                 return
             last_error = "未从回答中提取到 SELECT SQL 代码块"
+            # 带诊断的重试：指出上一轮具体问题，让重试有增量信息而非空转
+            if "```" in content and "```sql" not in content:
+                _diag = "上一次回答用了代码块但语言标记不是 sql（必须以 ```sql 开头）"
+            elif "select" not in content.lower():
+                _diag = "上一次回答是自然语言、完全没有 SELECT 语句；若确实无表/字段可用，按协议首行输出 intent=refuse，否则必须给出 SQL"
+            else:
+                _diag = "上一次回答中的 SQL 未被完整识别：必须以 ```sql 开头、以 ``` 闭合，代码块内是完整可执行的 SELECT"
             yield {"type": "retry", "msg": "未识别到 SQL，正在重试…"}
             messages.append({"role": "assistant", "content": content})
             messages.append({"role": "user",
-                             "content": "【重要】上一次回答中没有找到可执行的 SELECT SQL。请严格按系统提示词「四、输出格式」：**仅输出** 完整闭合的 ```sql 代码块（含必要注释），无任何多余文字。"})
+                             "content": f"【重要】{_diag}。请严格按系统提示词「四、输出格式」：**仅输出** 一个完整闭合的 ```sql 代码块（含必要注释），无任何多余文字，不要重复上一次的错误。"})
             continue
 
         # 校验 SQL（语法/只读/表存在/字段存在/计数形状），通过则应用中文字段别名
@@ -1834,12 +1794,12 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
 - 否则需要查询数据库数据（【可用表与字段】有相关表）→ intent=query，给出 sql；
 - 否则通用对话/创作/翻译/写作/编程等不依赖数据库的任务 → intent=chat（explain 放完整回答）；
 - 否则恶意请求/违法内容/完全无意义 → intent=refuse。
-- 判断为 query 时，必须在 ```sql 代码块内输出完整可执行的 SELECT SQL；
-- 判断为 chat/knowledge/refuse 时，输出正常文字回答即可（回答可自然说明），**禁止**为了凑 SQL 而编造不存在的表或字段。
+- 判断为 query 时，直接输出一个完整闭合的 ```sql 代码块（SELECT），不要输出 intent 标记；
+- 判断为 chat/knowledge/refuse 时，第一行必须独占输出 `intent=chat` / `intent=knowledge` / `intent=refuse` 标记，第二行起为自然语言回答，**禁止**为了凑 SQL 而编造不存在的表或字段。
 
 【用户问题】{question}
 
-严格按系统提示词「四、输出格式」输出：**仅输出** ```sql 代码块（含必要注释），无任何多余文字、解释、说明。"""
+数据查询严格按系统提示词「四、输出格式」仅输出一个完整闭合的 ```sql 代码块（含必要注释），无多余文字；非数据查询按「五、判定规则」首行输出 intent 标记后再写回答。"""
     if exec_error:
         user_prompt += f"""
 【上次执行失败，必须修正】
@@ -1853,7 +1813,7 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
 
     from .sql_extractor import extract_first_sql
     from ..executor import validate_sql
-    messages = [{"role": "system", "content": SYSTEM_PROMPT},
+    messages = [{"role": "system", "content": _load_sql_system_prompt()},
                 {"role": "user", "content": user_prompt}]
     from ..config import get_settings
     attempts = (retries if retries is not None else get_settings().sql_correct_retries)
@@ -1862,7 +1822,6 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
     for i in range(attempts + 1):
         # 流式调用 LLM（自然语言 + markdown SQL；关闭内部 thinking 避免 Qwen3.5-4B 思考链挤占 content）
         content = ""
-        force_retry = False
         stream_gen = client.chat_stream(messages, json_mode=False, max_tokens=4096, thinking=False)
         while True:
             try:
@@ -1883,22 +1842,10 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
                     # 提前中断1：检测到完整的 ```sql ... ``` 代码块就停止
                     if "```sql" in content and content.rfind("```") > content.find("```sql") + 5:
                         break
-                    # 提前中断2：思考内容超过 1500 字仍无 SQL，强制中断重试（推理模型思考链过长）
-                    if len(content) > 1500 and "```sql" not in content:
-                        last_error = "模型思考过程过长，已强制中断"
-                        yield {"type": "retry", "msg": "正在精简输出…"}
-                        messages.append({"role": "assistant", "content": content[:500]})
-                        messages.append({"role": "user",
-                                         "content": "【重要】不要展开分析过程，不要编号列举，严格按系统提示词「四、输出格式」：**仅输出** ```sql 代码块（含必要注释）。"})
-                        force_retry = True
-                        break
             except StopIteration as e:
                 val = e.value or {}
                 content = (val.get("content") or content).strip()
                 break
-        if force_retry:
-            continue
-
         # 从回答中提取 SQL（markdown ```sql 代码块优先，兜底裸 SELECT）
         sql = _normalize_sql_punctuation(extract_first_sql(content) or "")
         # 排查辅助：每次 LLM 响应全文打印到日志（含提取结果）
@@ -1910,17 +1857,24 @@ ORDER BY 类型A数量 DESC, 类型B数量 DESC;
                 # 模型判定非数据查询（chat/knowledge/refuse）：直接返回文字回答，不重试
                 logger.info("[NL2SQL] 判定为 %s 回答，跳过 SQL 重试", non_sql)
                 yield {"type": "result", "result": {
-                    "intent": non_sql, "sql": "", "explain": content,
+                    "intent": non_sql, "sql": "", "explain": _strip_intent_marker(content),
                     "tables": [t.table_name for t in tables],
                     "selected_tables": select_meta.get("raw", []),
                     "select_source": select_meta.get("source", ""),
                     "rag_hits": _rag_hits}}
                 return
             last_error = "未从回答中提取到 SELECT SQL 代码块"
+            # 带诊断的重试：指出上一轮具体问题，让重试有增量信息而非空转
+            if "```" in content and "```sql" not in content:
+                _diag = "上一次回答用了代码块但语言标记不是 sql（必须以 ```sql 开头）"
+            elif "select" not in content.lower():
+                _diag = "上一次回答是自然语言、完全没有 SELECT 语句；若确实无表/字段可用，按协议首行输出 intent=refuse，否则必须给出 SQL"
+            else:
+                _diag = "上一次回答中的 SQL 未被完整识别：必须以 ```sql 开头、以 ``` 闭合，代码块内是完整可执行的 SELECT"
             yield {"type": "retry", "msg": "未识别到 SQL，正在重试…"}
             messages.append({"role": "assistant", "content": content})
             messages.append({"role": "user",
-                             "content": "【重要】上一次回答中没有找到可执行的 SELECT SQL。请严格按系统提示词「四、输出格式」：**仅输出** 完整闭合的 ```sql 代码块（含必要注释），无任何多余文字。"})
+                             "content": f"【重要】{_diag}。请严格按系统提示词「四、输出格式」：**仅输出** 一个完整闭合的 ```sql 代码块（含必要注释），无任何多余文字，不要重复上一次的错误。"})
             continue
 
         # 校验 SQL（语法/只读/表存在/字段存在/计数形状），通过则应用中文字段别名

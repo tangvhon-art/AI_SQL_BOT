@@ -17,6 +17,7 @@ from typing import Any, Callable
 import logging
 
 from .query_spec import MultiQuerySpec, SubQuerySpec
+from .llm_json import extract_json as _llm_extract_json
 
 logger = logging.getLogger(__name__)
 
@@ -390,30 +391,36 @@ class MultiQueryDecomposer:
             prompt = (
                 "你是一个查询拆解助手。请判断以下自然语言问题是否包含多个独立的数据查询意图。\n"
                 "如果包含多个意图，请拆解为多个独立的子问题，每个子问题可以独立执行 SQL 查询。\n"
-                "如果只有一个意图，返回原问题。\n\n"
-                "【重要判断规则】\n"
-                "1. 问题中出现「两个问题」「三个问题」「N个问题」「分别查询」「分别统计」等表述时，必须拆解为多个子问题。\n"
-                "2. 问题中出现「以及」「还有」「并且」等并列连词，且前后是不同的数据指标（如「发起量」和「占比」）时，必须拆解。\n"
-                "3. 每个子问题必须是完整的、可独立执行的查询，保留公共的时间范围/条件。\n"
-                "4. 拆解时去掉「两个问题」「三个问题」等标记性表述。\n\n"
-                f"问题：{question}\n\n"
-                "请严格按 JSON 格式返回：{\"sub_questions\": [\"子问题1\", \"子问题2\", ...]}\n"
-                "只返回 JSON，不要其他文字。"
+                "如果只有一个意图，sub_questions 只放原问题本身（长度为 1 的数组）。\n\n"
+                "【拆解判断规则】\n"
+                "1. 出现「两个问题/三个问题/N个问题/分别查询/分别统计/同时统计/对比以下/从几个维度」等表述时，必须拆为多个子问题；\n"
+                "2. 出现「以及/还有/并且/同时/另外」等并列连词，且前后是不同数据指标或不同分析对象（如「发起量」和「占比」）时，必须拆；\n"
+                "3. 同一指标的不同限定（如「本月和上月的销量」属于一个对比查询）不要拆；只是换说法/补充条件不要拆；\n"
+                "4. 每个子问题必须完整、可独立执行，保留公共的时间范围/筛选条件，不得丢失；\n"
+                "5. 去掉「两个问题」「三个问题」等标记性表述；\n"
+                "6. 无法确定是否多意图时，保持单查询（数组里只放原问题），不要为拆而拆。\n\n"
+                "【输出协议】只输出一个 JSON 对象，键名固定为 sub_questions，值为非空字符串数组，"
+                "至少 1 个元素；禁止 Markdown 围栏、解释文字、null 元素。\n"
+                "格式：{\"sub_questions\": [\"子问题1\", \"子问题2\"]}\n\n"
+                f"问题：{question}"
             )
             resp = self.llm.chat(
                 [{"role": "user", "content": prompt}],
                 temperature=0.1, json_mode=True, thinking=False,
             )
             text = resp if isinstance(resp, str) else getattr(resp, "content", str(resp))
-            # 提取 JSON
-            m = re.search(r"\{[\s\S]*\}", text)
-            if not m:
+            # 统一容错解析（围栏/尾逗号/单引号自动修复）
+            data = _llm_extract_json(text)
+            if not isinstance(data, dict):
                 return None
-            import json
-            data = json.loads(m.group(0))
             subs = data.get("sub_questions", [])
-            return [s.strip() for s in subs if s.strip()] if isinstance(subs, list) else None
-        except Exception:
+            if not isinstance(subs, list):
+                return None
+            cleaned = [str(s).strip() for s in subs if s and str(s).strip()]
+            # 兜底：拆解结果为空时视为单查询，保留原问题，避免意图丢失
+            return cleaned or [question.strip()]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[多查询拆解] LLM 拆解失败，按单查询处理: %s", exc)
             return None
 
 

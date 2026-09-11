@@ -63,14 +63,15 @@ function recommendChartType(card: ChartCardConfig): ChartType {
  */
 export function convertDashboardEvent(event: any): DashboardData {
   const cards: ChartCardConfig[] = (event.cards || []).map((c: any, i: number) => {
-    const dataset = c.data ? adaptQueryResult(c.data) : { dimensions: [], metrics: [], rows: [] };
+    const rawData = c.data || (c.columns ? { columns: c.columns, rows: c.rows } : null);
+    const dataset = rawData ? adaptQueryResult(rawData) : { dimensions: [], metrics: [], rows: [] };
     const baseCard: ChartCardConfig = {
       id: c.sub_id || `card-${i}`,
       title: c.title || `子查询 ${i + 1}`,
       chartType: (c.chart_type || 'bar') as ChartType,
       dataset,
       sql: c.sql,
-      subId: c.sub_id,
+      subId: c.sub_id || c.id || `card-${i}`,
       status: (c.status || (c.data ? 'success' : 'loading')) as ChartCardConfig['status'],
       error: c.error,
       retryable: c.retryable,
@@ -246,7 +247,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     }
     return (
       <Col key={card.id} span={24}>
-        <ChartCard config={card} height={320} />
+        <ChartCard config={card} height={320} onRetry={onRetryCard} retryLoading={card.subId ? retryDisabled?.(card.subId) : false} />
         <CardInsight card={card} />
       </Col>
     );

@@ -451,6 +451,16 @@ def _seed_builtin_prompts() -> None:
             "is_default": False,
         },
     ]
+    # 统一为所有内置解读模板追加输出协议（与 AiInterpreter._parse_result 解析契约对齐）
+    _interpret_contract = (
+        "\n【输出协议（必须严格遵守）】只输出一个合法 JSON 对象，禁止 Markdown 代码围栏与解释文字；"
+        "键名固定为 summary/key_metrics/trends/comparisons/anomalies/suggestions；"
+        "key_metrics 元素为 {name,value,change}，anomalies 元素为 {desc,severity}（severity 只能取 high/medium/low），"
+        "trends/comparisons/suggestions 为字符串数组；所有数字必须来自上方数据，禁止编造；"
+        "无内容的字段输出空数组 [] 或空字符串，不要输出 null；即使数据不足，也必须输出结构完整的最小合法 JSON。"
+    )
+    for _item in builtin:
+        _item["prompt_template"] = _item["prompt_template"] + _interpret_contract
     try:
         with SessionLocal() as db:
             existing = db.query(Prompt).filter(Prompt.is_builtin.is_(True)).first()

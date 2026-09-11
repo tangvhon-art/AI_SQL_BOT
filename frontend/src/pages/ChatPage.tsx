@@ -37,12 +37,6 @@ export default function ChatPage() {
   const [promptList, setPromptList] = useState<Array<{ id: number; name: string; is_default: boolean }>>([])
   const [histOpen, setHistOpen] = useState(false)
 
-  // ========== 保存为查询（AntD Modal 代替原生 prompt）==========
-  const [saveOpen, setSaveOpen] = useState(false)
-  const [saveName, setSaveName] = useState('')
-  const [saving, setSaving] = useState(false)
-  const saveMsgRef = useRef<ChatMsg | null>(null)
-  const saveInputRef = useRef<InputRef>(null)
   // ========== 保存至报告中心 ==========
   const [reportOpen, setReportOpen] = useState(false)
   const [reportName, setReportName] = useState('')
@@ -635,41 +629,17 @@ export default function ChatPage() {
   }
 
   const saveQuery = (msg: ChatMsg) => {
-    const sql = String((msg.content as Record<string, unknown>).sql ?? '')
+    const content = (msg.content ?? {}) as Record<string, unknown>
+    const sql = String(content.sql ?? '')
     if (!sql) {
       msgApi.warning('该消息无可用 SQL')
       return
     }
-    saveMsgRef.current = msg
-    setSaveName(`查询 ${new Date().toLocaleString()}`)
-    setSaveOpen(true)
-  }
-
-  const submitSave = async () => {
-    const msg = saveMsgRef.current
-    const name = saveName.trim()
-    if (!msg || !name) return
-    const sql = String((msg.content as Record<string, unknown>).sql ?? '')
-    if (!sql) {
-      msgApi.warning('该消息无可用 SQL')
-      setSaveOpen(false)
-      return
-    }
-    setSaving(true)
-    try {
-      await client.post('/saved-queries', {
-        name,
-        sql_text: sql,
-        params: [],
-        chart_config: {},
-      })
-      msgApi.success('已保存，可在「保存查询」中复用')
-      setSaveOpen(false)
-    } catch (e) {
-      toastError(e)
-    } finally {
-      setSaving(false)
-    }
+    // 单查询结果：调用后端保存至报告中心
+    reportMsgRef.current = msg
+    const q = String(content.question ?? '')
+    setReportName(q ? `${q.slice(0, 30)} 报告` : `问数报告 ${new Date().toLocaleString()}`)
+    setReportOpen(true)
   }
 
   // ========== 保存至报告中心（多查询 Dashboard 结果）==========
@@ -690,17 +660,29 @@ export default function ChatPage() {
     const title = reportName.trim()
     if (!msg || !title) return
     const content = (msg.content ?? {}) as Record<string, unknown>
+    // 单查询结果：调用后端专用接口保存至报告中心
     if (!content.dashboard) {
-      msgApi.warning('该消息无可保存的分析结果')
-      setReportOpen(false)
+      setReportSaving(true)
+      try {
+        await client.post(`/chat/${msg.id}/save-report`, { name: title })
+        msgApi.success('已保存至报告中心')
+        setReportOpen(false)
+      } catch (e) {
+        toastError(e)
+      } finally {
+        setReportSaving(false)
+      }
       return
     }
     setReportSaving(true)
     try {
+      const multiSpec = { ...((content.multi_spec as Record<string, unknown>) ?? {}) }
+      if (dsId != null && !multiSpec.datasource_id) multiSpec.datasource_id = dsId
+      console.log('[save-report] dsId=', dsId, 'multiSpec=', multiSpec)
       await client.post('/reports', {
         title,
         original_question: String(content.original_question ?? content.question ?? ''),
-        multi_query_spec: (content.multi_spec as Record<string, unknown>) ?? {},
+        multi_query_spec: multiSpec,
         dashboard_data: (content.dashboard as Record<string, unknown>) ?? {},
         ai_interpretation: (content.ai_interpretation as Record<string, unknown>) ?? {},
         interpretation_text: String((content.ai_interpretation as Record<string, unknown>)?.summary ?? ''),
@@ -1008,30 +990,6 @@ export default function ChatPage() {
           )}
         />
       </Drawer>
-
-      {/* ---------- 保存为查询弹窗（AntD Modal）---------- */}
-      <Modal
-        title="保存为查询"
-        open={saveOpen}
-        onOk={submitSave}
-        onCancel={() => setSaveOpen(false)}
-        okText="确定"
-        cancelText="取消"
-        confirmLoading={saving}
-        okButtonProps={{ disabled: !saveName.trim() }}
-        afterOpenChange={(open) => { if (open) saveInputRef.current?.focus() }}
-        width={420}
-      >
-        <div style={{ marginBottom: 8, fontWeight: 500 }}>保存为查询名称：</div>
-        <Input
-          ref={saveInputRef}
-          value={saveName}
-          onChange={(e) => setSaveName(e.target.value)}
-          placeholder="请输入查询名称"
-          maxLength={100}
-          onPressEnter={submitSave}
-        />
-      </Modal>
 
       {/* ---------- 保存至报告中心弹窗 ---------- */}
       <Modal

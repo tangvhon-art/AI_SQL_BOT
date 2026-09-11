@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import Report
+from ..models import Report, InsightReport
 from .deps import get_current_user
 
 router = APIRouter(prefix="/reports", tags=["报告管理"])
@@ -47,7 +47,13 @@ def get_report(report_id: int, db: Session = Depends(get_db), user=Depends(get_c
     p = db.query(Report).filter(Report.id == report_id, Report.is_deleted.is_(False)).first()
     if not p or p.workspace_id != user.workspace_id:
         raise HTTPException(404, "报告不存在")
-    return {"ok": True, "item": _to_dict(p, detail=True)}
+    item = _to_dict(p, detail=True)
+    # 关联洞察报告配置快照，用于重新生成
+    ir = db.query(InsightReport).filter(InsightReport.report_id == report_id).first()
+    if ir and ir.config_snapshot:
+        item["insight_config"] = ir.config_snapshot
+        item["template_id"] = ir.template_id
+    return {"ok": True, "item": item}
 
 
 @router.post("")

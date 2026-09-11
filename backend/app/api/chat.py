@@ -36,7 +36,7 @@ from ..executor import run_query, to_jsonable
 from ..engine.rate_limiter import RateLimitExceeded
 from ..llm import LLMClient, LLMError
 from ..models import (Conversation, ConversationMessage, FaqPair, QueryLog,
-                      SavedQuery)
+                      )
 from .common import get_or_404
 from .deps import get_current_user
 
@@ -1293,22 +1293,49 @@ class SaveQueryIn(BaseModel):
     remark: str = ""
 
 
-@router.post("/chat/{msg_id}/save-query")
-def save_query(msg_id: int, body: SaveQueryIn, db: Session = Depends(get_db),
-               user=Depends(get_current_user)):
+@router.post("/chat/{msg_id}/save-report")
+def save_report(msg_id: int, body: SaveQueryIn, db: Session = Depends(get_db),
+                user=Depends(get_current_user)):
+    """将单查询结果保存至报告中心。"""
+    from ..models import Report
     msg = db.query(ConversationMessage).get(msg_id)
     if not msg or msg.content_type != "result":
         raise HTTPException(404, "消息不存在")
     content = msg.content_json or {}
     if not content.get("sql"):
         raise HTTPException(400, "该消息无可用 SQL")
-    sq = SavedQuery(workspace_id=user.workspace_id, owner_id=user.id, name=body.name,
-                    sql_text=content["sql"], params_json=body.params,
-                    chart_config_json=body.chart_config, tags=body.tags, remark=body.remark)
-    db.add(sq)
+    # 构建单查询报告快照
+    card = {
+        "id": "item1",
+        "title": body.name,
+        "question": content.get("question", ""),
+        "sql": content.get("sql", ""),
+        "columns": content.get("columns", []),
+        "rows": content.get("rows", []),
+        "chart": content.get("chart", {}),
+        "chart_type": content.get("chart_type", "table"),
+        "status": "success",
+    }
+    dashboard = {
+        "layout": [{"i": "item1", "x": 0, "y": 0, "w": 24, "h": 8}],
+        "cards": {"item1": card},
+    }
+    multi_spec = {
+        "datasource_id": content.get("datasource_id", 0),
+        "sub_queries": [{"id": "q1", "question": content.get("question", ""), "sql": content.get("sql", "")}],
+    }
+    report = Report(
+        workspace_id=user.workspace_id,
+        title=body.name,
+        original_question=content.get("question", ""),
+        multi_query_spec=multi_spec,
+        dashboard_data=dashboard,
+        created_by=user.id,
+    )
+    db.add(report)
     db.commit()
-    db.refresh(sq)
-    return {"id": sq.id, "name": sq.name}
+    db.refresh(report)
+    return {"id": report.id, "title": report.title}
 
 
 from ..database import SessionLocal  # noqa: E402

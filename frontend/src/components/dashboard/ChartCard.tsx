@@ -4,7 +4,8 @@
  * rank 排行榜多指标时支持切换指标列（如 数量 / 占比），让占比也能上图
  */
 import React, { useEffect, useRef, useState } from 'react';
-import { Select, Table, Empty, Spin } from 'antd';
+import { Button, Select, Table, Empty, Spin, Tooltip } from 'antd';
+import { ReloadOutlined } from '@ant-design/icons';
 import { useChartInteraction } from '../../hooks/useChartInteraction';
 import { buildChartOption } from '../../utils/chart-factory';
 import { CardWrapper } from './CardWrapper';
@@ -13,10 +14,17 @@ import type { ChartCardConfig } from '../../types/chart';
 interface ChartCardProps {
   config: ChartCardConfig;
   height?: number;
+  onRetry?: (subId: string) => void;
+  retryLoading?: boolean;
 }
 
-export const ChartCard: React.FC<ChartCardProps> = ({ config, height = 300 }) => {
+export const ChartCard: React.FC<ChartCardProps> = ({ config, height = 300, onRetry, retryLoading }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const retryBtn = onRetry && config.subId ? (
+    <Tooltip title="重新生成">
+      <Button size="small" type="text" icon={<ReloadOutlined />} loading={retryLoading} onClick={() => onRetry(config.subId!)} />
+    </Tooltip>
+  ) : null;
   // rank 多指标时当前展示的指标（null = 默认第一个指标）
   const [rankMetric, setRankMetric] = useState<string | null>(null);
   const { initChart, setOption } = useChartInteraction({
@@ -45,7 +53,7 @@ export const ChartCard: React.FC<ChartCardProps> = ({ config, height = 300 }) =>
   // 错误状态
   if (config.status === 'error') {
     return (
-      <CardWrapper title={config.title} sql={config.sql} height={height}>
+      <CardWrapper title={config.title} extra={retryBtn} sql={config.sql} height={height}>
         <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Empty description={config.error || '查询失败'} />
         </div>
@@ -56,7 +64,7 @@ export const ChartCard: React.FC<ChartCardProps> = ({ config, height = 300 }) =>
   // 加载中
   if (config.status === 'loading') {
     return (
-      <CardWrapper title={config.title} height={height}>
+      <CardWrapper title={config.title} extra={retryBtn} height={height}>
         <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Spin />
         </div>
@@ -67,7 +75,7 @@ export const ChartCard: React.FC<ChartCardProps> = ({ config, height = 300 }) =>
   // 空数据
   if (!config.dataset.rows.length) {
     return (
-      <CardWrapper title={config.title} sql={config.sql} height={height}>
+      <CardWrapper title={config.title} extra={retryBtn} sql={config.sql} height={height}>
         <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Empty description="无数据" />
         </div>
@@ -81,7 +89,7 @@ export const ChartCard: React.FC<ChartCardProps> = ({ config, height = 300 }) =>
       title: c, dataIndex: c, key: c, ellipsis: true,
     }));
     return (
-      <CardWrapper title={config.title} sql={config.sql} height={height}>
+      <CardWrapper title={config.title} extra={retryBtn} sql={config.sql} height={height}>
         <Table
           size="small"
           columns={columns}
@@ -96,7 +104,7 @@ export const ChartCard: React.FC<ChartCardProps> = ({ config, height = 300 }) =>
   // ECharts 渲染（rank 多指标时顶部提供指标切换）
   const showMetricSwitch = config.chartType === 'rank' && config.dataset.metrics.length > 1;
   return (
-    <CardWrapper title={config.title} sql={config.sql} height={height}>
+    <CardWrapper title={config.title} extra={retryBtn} sql={config.sql} height={height}>
       <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
         {showMetricSwitch && (
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4, flexShrink: 0 }}>

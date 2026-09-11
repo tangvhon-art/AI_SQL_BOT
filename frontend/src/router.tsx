@@ -11,7 +11,6 @@ import SchemaPage from './pages/SchemaPage'
 import KnowledgePage from './pages/KnowledgePage'
 import ModelPage from './pages/ModelPage'
 import PermissionPage from './pages/PermissionPage'
-import SavedQueryPage from './pages/SavedQueryPage'
 import AuditPage from './pages/AuditPage'
 import RolePage from './pages/RolePage'
 import GroupPage from './pages/GroupPage'
@@ -23,6 +22,7 @@ import SysConfigPage from './pages/SysConfigPage'
 import PromptPage from './pages/PromptPage'
 import ReportCenterPage from './pages/ReportCenterPage'
 import InsightPage from './pages/InsightPage'
+import MenuConfigPage from './pages/MenuConfigPage'
 import { TOKEN_KEY } from './api/client'
 import { glassTheme } from './ui'
 
@@ -39,7 +39,6 @@ function Shell() {
           <Route path="/datasources/:id/schema" element={<SchemaPage />} />
           <Route path="/knowledge" element={<KnowledgePage />} />
           <Route path="/models" element={<ModelPage />} />
-          <Route path="/saved" element={<SavedQueryPage />} />
           <Route path="/roles" element={<RolePage />} />
           <Route path="/groups" element={<GroupPage />} />
           <Route path="/users" element={<UserPage />} />
@@ -51,6 +50,7 @@ function Shell() {
           <Route path="/prompts" element={<PromptPage />} />
           <Route path="/reports" element={<ReportCenterPage />} />
           <Route path="/insight" element={<InsightPage />} />
+          <Route path="/menu-config" element={<MenuConfigPage />} />
           <Route path="/audit" element={<AuditPage />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />
         </Route>

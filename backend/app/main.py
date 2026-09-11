@@ -7,10 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api import (ai_interpret, audit, auth, cache, chat, chat_multi, datasources,
                   dicts, doc_chat_api, eval as eval_api, insight, knowledge,
                   models_config, org, permissions, prompts, reports,
-                  scenes, scheduled_tasks, system_config)
+                  scenes, system_config)
 from .config import get_settings
 from .database import init_db
-from .engine.scheduler import start_scheduler, stop_scheduler
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -38,7 +37,6 @@ app.include_router(models_config.router, prefix=API_PREFIX)
 app.include_router(chat.router, prefix=API_PREFIX)
 app.include_router(chat_multi.router, prefix=API_PREFIX)
 app.include_router(doc_chat_api.router, prefix=API_PREFIX)
-app.include_router(scheduled_tasks.router, prefix=API_PREFIX)
 app.include_router(permissions.router, prefix=API_PREFIX)
 app.include_router(dicts.router, prefix=API_PREFIX)
 app.include_router(audit.router, prefix=API_PREFIX)
@@ -70,14 +68,12 @@ def on_startup():
         load_overrides_from_db(db)
     finally:
         db.close()
-    start_scheduler()
     logger.info("AI 问数系统后端已启动")
 
 
 @app.on_event("shutdown")
 def on_shutdown():
     """优雅停止：先停定时任务调度线程，再退出进程。"""
-    stop_scheduler()
     logger.info("AI 问数系统后端已停止")
 
 

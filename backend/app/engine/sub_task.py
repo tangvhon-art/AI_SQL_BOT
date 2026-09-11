@@ -497,24 +497,53 @@ def _build_trace(sub: Any, sql: str, exec_result: dict, ctx: SubTaskContext) -> 
     }
 
 
+def _interpret_text_valid(text: str) -> bool:
+    """N7 解读结果的轻量校验：非空、是业务结论而非拒答/代码/标记。"""
+    if not text:
+        return False
+    low = text.strip()
+    if low.startswith("```") or low.startswith("{") or low.startswith("["):
+        return False
+    bad = ("作为AI", "作为人工智能", "无法回答", "我不能", "Sorry", "I cannot")
+    return not any(b in low for b in bad)
+
+
 def _interpret(sub: Any, exec_result: dict, facts: dict, ctx: SubTaskContext) -> str:
-    """N7：子查询解读。LLM 可用时生成一句解读（硬约束只引用 facts 数字），失败回退模板。"""
+    """N7：子查询解读。LLM 可用时生成一句解读（硬约束只引用 facts 数字）；
+    首轮不合格 → 带诊断重试 1 次；仍失败/异常才回退确定性模板。"""
     if ctx.llm is None:
         return _template_interpret(sub, exec_result, facts)
-    try:
-        rows = (exec_result or {}).get("rows") or []
-        prompt = (
-            "你是数据解读助手。请基于给出的确定性事实（只能引用其中的数字，不得编造）"
-            "为子查询写一句 ≤60 字的中文结论，不要复述问题。\n"
-            f"问题：{sub.question}\n事实：{facts}\n返回行数：{len(rows)}"
-        )
-        text = ctx.llm.chat([{"role": "user", "content": prompt}],
-                            temperature=0.2, thinking=False)
-        text = (text or "").strip()
-        return text[:200] if text else _template_interpret(sub, exec_result, facts)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[子查询][%s] N7 解读失败，回退模板: %s", sub.sub_id, exc)
-        return _template_interpret(sub, exec_result, facts)
+    rows = (exec_result or {}).get("rows") or []
+    base_prompt = (
+        "你是数据解读助手。请基于给出的确定性事实，为子查询写一句 ≤60 字的中文业务结论。\n"
+        "硬约束：\n"
+        "1. 只能引用「事实」中出现的数字与名称，禁止编造、禁止四舍五入或换算出新数字；\n"
+        "2. 不要复述问题，不要输出思考过程、Markdown、JSON、role 标记；\n"
+        "3. 直接输出这一句结论本身。\n"
+        f"问题：{sub.question}\n事实：{facts}\n返回行数：{len(rows)}"
+    )
+    text = ""
+    for attempt in range(2):
+        try:
+            if attempt == 0:
+                messages = [{"role": "user", "content": base_prompt}]
+            else:
+                diag = "上一次回答为空" if not text else "上一次回答不是一句业务结论（含拒答/代码/标记）"
+                messages = [
+                    {"role": "user", "content": base_prompt},
+                    {"role": "assistant", "content": (text or "")[:300]},
+                    {"role": "user", "content": (
+                        f"【输出修正】{diag}。请只用「事实」中的数字，直接输出一句 ≤60 字中文结论，"
+                        "不要复述问题、不要任何标记。")},
+                ]
+            raw = ctx.llm.chat(messages, temperature=0.2, thinking=False)
+            text = (raw or "").strip()
+            if _interpret_text_valid(text):
+                return text[:200]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[子查询][%s] N7 解读第 %d 次失败: %s", sub.sub_id, attempt + 1, exc)
+    logger.warning("[子查询][%s] N7 解读两次均不合格，回退模板", sub.sub_id)
+    return _template_interpret(sub, exec_result, facts)
 
 
 def _template_interpret(sub: Any, exec_result: dict, facts: dict) -> str:
